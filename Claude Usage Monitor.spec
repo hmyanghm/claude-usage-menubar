@@ -42,7 +42,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='Claude Usage Monitor.app',
-    icon=None,
+    icon='app_icon.icns',
     bundle_identifier='com.claude.usage-monitor',
     info_plist={
         'LSUIElement': True,              # menu bar only (no Dock icon)

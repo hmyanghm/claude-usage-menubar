@@ -44,6 +44,16 @@ rm -rf "$DMG_DIR" "$DMG_NAME"
 mkdir -p "$DMG_DIR"
 cp -R "dist/${APP_NAME}.app" "$DMG_DIR/"
 
+# Clean resource forks and extended attributes
+echo "🧹 확장 속성 정리 중..."
+xattr -cr "$DMG_DIR/${APP_NAME}.app"
+find "$DMG_DIR/${APP_NAME}.app" -name "._*" -delete
+find "$DMG_DIR/${APP_NAME}.app" -name ".DS_Store" -delete
+
+# Ad-hoc code signing
+echo "🔏 코드 서명 중..."
+codesign --force --deep --sign - "$DMG_DIR/${APP_NAME}.app"
+
 echo "📀 DMG 생성 중..."
 hdiutil create -volname "$APP_NAME" \
     -srcfolder "$DMG_DIR" \

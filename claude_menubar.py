@@ -331,8 +331,21 @@ class ClaudeUsageApp(rumps.App):
         super().__init__(name="Claude Usage", title="⚡ Claude", quit_button=None)
         self.tracker = UsageTracker()
         self.view_mode = "dashboard"  # dashboard | detail
-        self._rebuild()
-        self._start_timer()
+        # Defer heavy work (API calls, file I/O) to after the run loop starts
+        self.menu.add(rumps.MenuItem("로딩 중...", callback=None))
+        self.menu.add(rumps.separator)
+        self.menu.add(rumps.MenuItem("종료", callback=rumps.quit_application))
+
+    @rumps.timer(1)
+    def _initial_load(self, timer):
+        """First load after run loop starts, then switch to normal refresh interval."""
+        timer.stop()
+        try:
+            self._rebuild()
+        except Exception:
+            pass
+        self._refresh_timer = rumps.Timer(self._on_tick, REFRESH_INTERVAL_SEC)
+        self._refresh_timer.start()
 
     # ── menu builders ───────────────────────────────────────────────────
 
@@ -468,10 +481,6 @@ class ClaudeUsageApp(rumps.App):
     def _refresh(self, _=None):
         self._rebuild()
 
-    def _start_timer(self):
-        self._timer = rumps.Timer(self._on_tick, REFRESH_INTERVAL_SEC)
-        self._timer.start()
-
     def _on_tick(self, _=None):
         try:
             self._rebuild()
@@ -482,13 +491,21 @@ class ClaudeUsageApp(rumps.App):
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
+    import sys
+    print(f"[DEBUG] Python: {sys.version}", flush=True)
+    print(f"[DEBUG] Executable: {sys.executable}", flush=True)
+    print(f"[DEBUG] CLAUDE_DIR: {CLAUDE_DIR} exists={CLAUDE_DIR.exists()}", flush=True)
     if not CLAUDE_DIR.exists():
         rumps.alert(
             title="Claude Code를 찾을 수 없습니다",
             message="~/.claude/ 디렉토리가 없습니다.\nClaude Code가 설치되어 있는지 확인해주세요.",
         )
         return
-    ClaudeUsageApp().run()
+    print("[DEBUG] Creating ClaudeUsageApp...", flush=True)
+    app = ClaudeUsageApp()
+    print(f"[DEBUG] App created, title={app.title}", flush=True)
+    print("[DEBUG] Calling app.run()...", flush=True)
+    app.run()
 
 
 if __name__ == "__main__":

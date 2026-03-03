@@ -355,6 +355,9 @@ class ClaudeUsageApp(rumps.App):
         # ── fetch real usage from API ──
         api = fetch_usage_api()
 
+        sess_tokens = sess_totals.get("total", 0)
+        week_tokens = week_totals.get("total", 0)
+
         if api and "five_hour" in api:
             sess_pct = api["five_hour"].get("utilization", 0)
             sess_reset = _parse_reset_time(api["five_hour"].get("resets_at"))
@@ -365,8 +368,6 @@ class ClaudeUsageApp(rumps.App):
             sonnet_reset = _parse_reset_time(sonnet_data.get("resets_at")) if sonnet_data else None
         else:
             # fallback: rough local estimates
-            sess_tokens = sess_totals.get("total", 0)
-            week_tokens = week_totals.get("total", 0)
             sess_pct = min(sess_tokens / 5_000_000 * 100, 100)
             week_pct = min(week_tokens / 50_000_000 * 100, 100)
             sess_reset = _next_session_reset()

@@ -45,9 +45,8 @@ app = BUNDLE(
     icon='app_icon.icns',
     bundle_identifier='com.claude.usage-monitor',
     info_plist={
-        'LSUIElement': True,              # menu bar only (no Dock icon)
         'CFBundleDisplayName': 'Claude Usage Monitor',
-        'CFBundleShortVersionString': '1.0.0',
+        'CFBundleShortVersionString': '1.0.1',
         'NSHighResolutionCapable': True,
     },
 )

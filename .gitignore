@@ -1,0 +1,6 @@
+build/
+dist/
+.build_venv/
+*.dmg
+__pycache__/
+*.pyc

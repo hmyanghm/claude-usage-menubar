@@ -2,16 +2,20 @@
 """
 Claude Code Usage Monitor v2 — macOS Menu Bar App
 Shows Claude Code usage with visual progress bars, just like /usage.
-Reads local JSONL session files from ~/.claude/ directory.
+Uses the Anthropic OAuth API for accurate rate-limit data,
+and reads local JSONL session files for detailed token/cost breakdowns.
 """
 
 import json
 import os
 import glob
 import time
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections import defaultdict
+from urllib.request import Request, urlopen
+from urllib.error import URLError
 
 import rumps
 
@@ -21,6 +25,9 @@ import rumps
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 REFRESH_INTERVAL_SEC = 30
+
+USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
+ANTHROPIC_BETA = "oauth-2025-04-20"
 
 # Session window = 5 hours, Week window = 7 days
 SESSION_WINDOW_HOURS = 5
@@ -38,6 +45,53 @@ PRICING = {
     "claude-sonnet-4-5":          {"input": 3.0,  "output": 15.0,  "cache_read": 0.30, "cache_write": 3.75},
     "default":                    {"input": 3.0,  "output": 15.0,  "cache_read": 0.30, "cache_write": 3.75},
 }
+
+# ─── OAuth / Usage API ───────────────────────────────────────────────────────
+
+def _get_oauth_token():
+    """Retrieve Claude Code OAuth access token from macOS Keychain."""
+    account = os.environ.get("USER", "claude-code-user")
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", account, "-w", "-s", "Claude Code-credentials"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout.strip())
+        return data.get("claudeAiOauth", {}).get("accessToken")
+    except Exception:
+        return None
+
+
+def fetch_usage_api():
+    """Call Anthropic usage API → dict with five_hour, seven_day, etc. or None."""
+    token = _get_oauth_token()
+    if not token:
+        return None
+    try:
+        req = Request(USAGE_API_URL, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "anthropic-beta": ANTHROPIC_BETA,
+            "User-Agent": "claude-code-menubar/1.0",
+        })
+        with urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+def _parse_reset_time(iso_str):
+    """Parse ISO timestamp from API → naive local datetime."""
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.astimezone(None).replace(tzinfo=None)
+    except Exception:
+        return None
+
 
 # ─── Progress Bar ────────────────────────────────────────────────────────────
 
@@ -298,19 +352,27 @@ class ClaudeUsageApp(rumps.App):
         week_totals, week_models, week_costs = self.tracker.week_usage()
         today_totals, _, _ = self.tracker.today_usage()
 
-        # ── estimate percentages ──
-        # We use token counts relative to a reference ceiling.
-        # These are rough heuristics; adjust LIMIT constants if needed.
-        sess_tokens = sess_totals.get("total", 0)
-        week_tokens = week_totals.get("total", 0)
+        # ── fetch real usage from API ──
+        api = fetch_usage_api()
 
-        # Reference limits (tokens) — very rough estimates based on public info
-        # Users can tune these in the config section above
-        SESS_LIMIT = 5_000_000   # ~5M tokens per 5-hour session
-        WEEK_LIMIT = 50_000_000  # ~50M tokens per week
-
-        sess_pct = min(sess_tokens / SESS_LIMIT * 100, 100) if SESS_LIMIT else 0
-        week_pct = min(week_tokens / WEEK_LIMIT * 100, 100) if WEEK_LIMIT else 0
+        if api and "five_hour" in api:
+            sess_pct = api["five_hour"].get("utilization", 0)
+            sess_reset = _parse_reset_time(api["five_hour"].get("resets_at"))
+            week_pct = api.get("seven_day", {}).get("utilization", 0) if api.get("seven_day") else 0
+            week_reset = _parse_reset_time((api.get("seven_day") or {}).get("resets_at"))
+            sonnet_data = api.get("seven_day_sonnet")
+            sonnet_pct = sonnet_data.get("utilization", 0) if sonnet_data else None
+            sonnet_reset = _parse_reset_time(sonnet_data.get("resets_at")) if sonnet_data else None
+        else:
+            # fallback: rough local estimates
+            sess_tokens = sess_totals.get("total", 0)
+            week_tokens = week_totals.get("total", 0)
+            sess_pct = min(sess_tokens / 5_000_000 * 100, 100)
+            week_pct = min(week_tokens / 50_000_000 * 100, 100)
+            sess_reset = _next_session_reset()
+            week_reset = _next_week_reset()
+            sonnet_pct = None
+            sonnet_reset = None
 
         # ── update title bar (weekly) ──
         self.title = f"⚡ {week_pct:.0f}%"
@@ -318,20 +380,33 @@ class ClaudeUsageApp(rumps.App):
         # ── Current session ──
         self.menu.add(rumps.MenuItem("Current session", callback=None))
         self.menu.add(rumps.MenuItem(f"  {make_bar(sess_pct)}", callback=None))
-        self.menu.add(rumps.MenuItem(
-            f"  Resets {_fmt_reset(_next_session_reset())}",
-            callback=None,
-        ))
+        if sess_reset:
+            self.menu.add(rumps.MenuItem(
+                f"  Resets {_fmt_reset(sess_reset)}",
+                callback=None,
+            ))
         self.menu.add(rumps.separator)
 
-        # ── Current week ──
+        # ── Current week (all models) ──
         self.menu.add(rumps.MenuItem("Current week (all models)", callback=None))
         self.menu.add(rumps.MenuItem(f"  {make_bar(week_pct)}", callback=None))
-        self.menu.add(rumps.MenuItem(
-            f"  Resets {_fmt_reset(_next_week_reset())}",
-            callback=None,
-        ))
+        if week_reset:
+            self.menu.add(rumps.MenuItem(
+                f"  Resets {_fmt_reset(week_reset)}",
+                callback=None,
+            ))
         self.menu.add(rumps.separator)
+
+        # ── Current week (Sonnet only) ──
+        if sonnet_pct is not None:
+            self.menu.add(rumps.MenuItem("Current week (Sonnet only)", callback=None))
+            self.menu.add(rumps.MenuItem(f"  {make_bar(sonnet_pct)}", callback=None))
+            if sonnet_reset:
+                self.menu.add(rumps.MenuItem(
+                    f"  Resets {_fmt_reset(sonnet_reset)}",
+                    callback=None,
+                ))
+            self.menu.add(rumps.separator)
 
         # ── Detail breakdown (submenu) ──
         detail = rumps.MenuItem("📊 세부 사용량")

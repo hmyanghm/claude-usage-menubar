@@ -388,8 +388,8 @@ class ClaudeUsageApp(rumps.App):
             sonnet_pct = None
             sonnet_reset = None
 
-        # ── update title bar (weekly) ──
-        self.title = f"⚡ {week_pct:.0f}%"
+        # ── update title bar (current session) ──
+        self.title = f"⚡ {sess_pct:.0f}%"
 
         # ── Current session ──
         self.menu.add(rumps.MenuItem("Current session", callback=None))

@@ -48,8 +48,32 @@ PRICING = {
 
 # ─── OAuth / Usage API ───────────────────────────────────────────────────────
 
-def _get_oauth_token():
-    """Retrieve Claude Code OAuth access token from macOS Keychain."""
+# Estimated cost limits (USD) per plan tier — rough approximations
+# These are used ONLY when the usage API is unavailable
+TIER_LIMITS = {
+    # tier_keyword:           (5h_session, 7d_week)
+    "max_5x":                 (250.0, 2500.0),
+    "max_20x":                (1000.0, 10000.0),
+    "max":                    (50.0, 500.0),
+    "pro":                    (5.0, 50.0),
+}
+
+# Cache for API responses — survives transient API failures
+_api_cache = {
+    "token_prefix": None,   # first 20 chars of token — detect account switch
+    "data": None,           # last successful API response
+    "fetched_at": 0,        # timestamp of last successful fetch
+    "is_stale": False,      # True when using cached data after API failure
+    "account_email": None,  # current account email
+    "account_name": None,   # current account display name
+    "rate_limit_tier": None,  # e.g. "default_claude_max_5x"
+}
+
+PROFILE_API_URL = "https://api.anthropic.com/api/oauth/profile"
+
+
+def _get_oauth_data():
+    """Retrieve full OAuth data from macOS Keychain."""
     account = os.environ.get("USER", "claude-code-user")
     try:
         result = subprocess.run(
@@ -58,28 +82,102 @@ def _get_oauth_token():
         )
         if result.returncode != 0:
             return None
-        data = json.loads(result.stdout.strip())
-        return data.get("claudeAiOauth", {}).get("accessToken")
+        return json.loads(result.stdout.strip())
     except Exception:
         return None
 
 
-def fetch_usage_api():
-    """Call Anthropic usage API → dict with five_hour, seven_day, etc. or None."""
-    token = _get_oauth_token()
-    if not token:
+def _get_oauth_token():
+    """Retrieve Claude Code OAuth access token from macOS Keychain."""
+    data = _get_oauth_data()
+    if not data:
         return None
+    oauth = data.get("claudeAiOauth", {})
+    # Cache the rate limit tier
+    tier = oauth.get("rateLimitTier")
+    if tier:
+        _api_cache["rate_limit_tier"] = tier
+    return oauth.get("accessToken")
+
+
+def _estimate_limits():
+    """Return (session_limit_usd, week_limit_usd) based on plan tier."""
+    tier = (_api_cache.get("rate_limit_tier") or "").lower()
+    for keyword, limits in TIER_LIMITS.items():
+        if keyword in tier:
+            return limits
+    # Unknown tier — use pro as conservative default
+    return TIER_LIMITS["pro"]
+
+
+def _fetch_profile(token):
+    """Fetch account profile (email, name) from Anthropic API."""
     try:
-        req = Request(USAGE_API_URL, headers={
+        req = Request(PROFILE_API_URL, headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "anthropic-beta": ANTHROPIC_BETA,
             "User-Agent": "claude-code-menubar/1.0",
         })
         with urlopen(req, timeout=5) as resp:
-            return json.loads(resp.read())
+            data = json.loads(resp.read())
+            acct = data.get("account", {})
+            return acct.get("email"), acct.get("display_name") or acct.get("full_name")
     except Exception:
-        return None
+        return None, None
+
+
+def fetch_usage_api():
+    """Call Anthropic usage API with caching and account-switch detection.
+    Returns (data_dict | None, is_stale: bool).
+    """
+    token = _get_oauth_token()
+    if not token:
+        return None, False
+
+    # Detect account switch → clear cache and refresh profile
+    token_prefix = token[:20]
+    if _api_cache["token_prefix"] != token_prefix:
+        _api_cache["data"] = None
+        _api_cache["fetched_at"] = 0
+        _api_cache["is_stale"] = False
+        # Fetch new account profile
+        email, name = _fetch_profile(token)
+        _api_cache["account_email"] = email
+        _api_cache["account_name"] = name
+    _api_cache["token_prefix"] = token_prefix
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "anthropic-beta": ANTHROPIC_BETA,
+        "User-Agent": "claude-code-menubar/1.0",
+    }
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            req = Request(USAGE_API_URL, headers=headers)
+            with urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+                _api_cache["data"] = data
+                _api_cache["fetched_at"] = time.time()
+                _api_cache["is_stale"] = False
+                return data, False
+        except URLError as e:
+            if hasattr(e, "code") and e.code == 429:
+                retry_after = float(getattr(e, "headers", {}).get("Retry-After", "1") or "1")
+                if attempt < max_retries - 1:
+                    time.sleep(max(retry_after, 0.5))
+                    continue
+            break
+        except Exception:
+            break
+
+    # API failed — return cached data if available (max 5 min old)
+    if _api_cache["data"] and (time.time() - _api_cache["fetched_at"]) < 300:
+        _api_cache["is_stale"] = True
+        return _api_cache["data"], True
+    return None, False
 
 
 def _parse_reset_time(iso_str):
@@ -366,7 +464,7 @@ class ClaudeUsageApp(rumps.App):
         today_totals, _, _ = self.tracker.today_usage()
 
         # ── fetch real usage from API ──
-        api = fetch_usage_api()
+        api, api_stale = fetch_usage_api()
 
         sess_tokens = sess_totals.get("total", 0)
         week_tokens = week_totals.get("total", 0)
@@ -380,19 +478,46 @@ class ClaudeUsageApp(rumps.App):
             sonnet_pct = sonnet_data.get("utilization", 0) if sonnet_data else None
             sonnet_reset = _parse_reset_time(sonnet_data.get("resets_at")) if sonnet_data else None
         else:
-            # fallback: rough local estimates
-            sess_pct = min(sess_tokens / 5_000_000 * 100, 100)
-            week_pct = min(week_tokens / 50_000_000 * 100, 100)
-            sess_reset = _next_session_reset()
-            week_reset = _next_week_reset()
+            # API unavailable — estimate from local cost data
+            sess_limit, week_limit = _estimate_limits()
+            sess_cost = sess_totals.get("cost", 0)
+            week_cost = week_totals.get("cost", 0)
+            sess_pct = min(sess_cost / sess_limit * 100, 100) if sess_limit else 0
+            week_pct = min(week_cost / week_limit * 100, 100) if week_limit else 0
+            sess_reset = None
+            week_reset = None
             sonnet_pct = None
             sonnet_reset = None
 
+        api_ok = api and "five_hour" in api
+
         # ── update title bar (current session) ──
-        self.title = f"⚡ {sess_pct:.0f}%"
+        if api_ok:
+            stale_mark = "~" if api_stale else ""
+            self.title = f"⚡ {stale_mark}{sess_pct:.0f}%"
+        else:
+            self.title = f"⚡ ~{sess_pct:.0f}%"
+
+        # ── Account info ──
+        acct_email = _api_cache.get("account_email")
+        acct_name = _api_cache.get("account_name")
+        if acct_email:
+            label = f"👤 {acct_name} ({acct_email})" if acct_name else f"👤 {acct_email}"
+            self.menu.add(rumps.MenuItem(label, callback=None))
+            self.menu.add(rumps.separator)
+
+        # ── API status indicator ──
+        if not api:
+            self.menu.add(rumps.MenuItem("⚠️ Usage API 일시 장애", callback=None))
+            self.menu.add(rumps.separator)
+        elif api_stale:
+            ago = int(time.time() - _api_cache["fetched_at"])
+            self.menu.add(rumps.MenuItem(f"⏳ 캐시 데이터 ({ago}초 전)", callback=None))
+            self.menu.add(rumps.separator)
 
         # ── Current session ──
-        self.menu.add(rumps.MenuItem("Current session", callback=None))
+        est = "" if api_ok else " (예상)"
+        self.menu.add(rumps.MenuItem(f"Current session{est}", callback=None))
         self.menu.add(rumps.MenuItem(f"  {make_bar(sess_pct)}", callback=None))
         if sess_reset:
             self.menu.add(rumps.MenuItem(
@@ -402,7 +527,7 @@ class ClaudeUsageApp(rumps.App):
         self.menu.add(rumps.separator)
 
         # ── Current week (all models) ──
-        self.menu.add(rumps.MenuItem("Current week (all models)", callback=None))
+        self.menu.add(rumps.MenuItem(f"Current week (all models){est}", callback=None))
         self.menu.add(rumps.MenuItem(f"  {make_bar(week_pct)}", callback=None))
         if week_reset:
             self.menu.add(rumps.MenuItem(

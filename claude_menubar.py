@@ -26,6 +26,37 @@ CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 REFRESH_INTERVAL_SEC = 30
 
+CONFIG_PATH = CLAUDE_DIR / "menubar_config.json"
+DEFAULT_CONFIG = {
+    "title_display": "session",   # "session" | "week" | "both"
+    "show_session": True,
+    "show_week": True,
+    "show_sonnet": True,
+}
+
+
+def _load_config():
+    """Load menubar config from JSON file, returning defaults if missing."""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        # Merge with defaults for any missing keys
+        merged = dict(DEFAULT_CONFIG)
+        merged.update(cfg)
+        return merged
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+        return dict(DEFAULT_CONFIG)
+
+
+def _save_config(config):
+    """Save menubar config to JSON file."""
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[CONFIG] Save error: {e}", flush=True)
+
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 ANTHROPIC_BETA = "oauth-2025-04-20"
 
@@ -67,7 +98,13 @@ _api_cache = {
     "account_email": None,  # current account email
     "account_name": None,   # current account display name
     "rate_limit_tier": None,  # e.g. "default_claude_max_5x"
+    "next_call_at": 0,      # earliest time to call usage API again
+    "backoff_sec": 90,      # current backoff interval (grows on 429)
 }
+
+API_INTERVAL_OK = 90        # normal: call every 1.5 min
+API_INTERVAL_MAX = 600      # max backoff: 10 min
+API_CACHE_TTL = 600         # cache valid for 10 min
 
 PROFILE_API_URL = "https://api.anthropic.com/api/oauth/profile"
 
@@ -127,9 +164,10 @@ def _fetch_profile(token):
         return None, None
 
 
-def fetch_usage_api():
-    """Call Anthropic usage API with caching and account-switch detection.
+def fetch_usage_api(force=False):
+    """Call Anthropic usage API with caching, backoff, and account-switch detection.
     Returns (data_dict | None, is_stale: bool).
+    If force=True, ignore backoff and call API immediately.
     """
     token = _get_oauth_token()
     if not token:
@@ -141,40 +179,67 @@ def fetch_usage_api():
         _api_cache["data"] = None
         _api_cache["fetched_at"] = 0
         _api_cache["is_stale"] = False
+        _api_cache["next_call_at"] = 0
+        _api_cache["backoff_sec"] = API_INTERVAL_OK
         # Fetch new account profile
         email, name = _fetch_profile(token)
         _api_cache["account_email"] = email
         _api_cache["account_name"] = name
     _api_cache["token_prefix"] = token_prefix
 
+    now = time.time()
+
+    # Respect backoff — skip API call if too soon
+    if not force and now < _api_cache["next_call_at"]:
+        if _api_cache["data"] and (now - _api_cache["fetched_at"]) < API_CACHE_TTL:
+            return _api_cache["data"], _api_cache["is_stale"]
+        return None, False
+
+    # Make the API call
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "anthropic-beta": ANTHROPIC_BETA,
         "User-Agent": "claude-code-menubar/1.0",
     }
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            req = Request(USAGE_API_URL, headers=headers)
-            with urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-                _api_cache["data"] = data
-                _api_cache["fetched_at"] = time.time()
-                _api_cache["is_stale"] = False
-                return data, False
-        except URLError as e:
-            if hasattr(e, "code") and e.code == 429:
-                retry_after = float(getattr(e, "headers", {}).get("Retry-After", "1") or "1")
-                if attempt < max_retries - 1:
-                    time.sleep(max(retry_after, 0.5))
-                    continue
-            break
-        except Exception:
-            break
+    try:
+        req = Request(USAGE_API_URL, headers=headers)
+        with urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+            _api_cache["data"] = data
+            _api_cache["fetched_at"] = time.time()
+            _api_cache["is_stale"] = False
+            # Success → reset to normal interval
+            _api_cache["backoff_sec"] = API_INTERVAL_OK
+            _api_cache["next_call_at"] = time.time() + API_INTERVAL_OK
+            return data, False
+    except URLError as e:
+        print(f"[API] URLError: {e}", flush=True)
+        if hasattr(e, "code") and e.code == 429:
+            # Use retry-after header if available, otherwise exponential backoff
+            retry_after = None
+            if hasattr(e, "headers"):
+                retry_after = e.headers.get("retry-after")
+            if retry_after:
+                try:
+                    wait = int(retry_after)
+                    print(f"[API] retry-after: {wait}s", flush=True)
+                    _api_cache["next_call_at"] = time.time() + wait
+                    _api_cache["backoff_sec"] = wait
+                except ValueError:
+                    _api_cache["backoff_sec"] = min(_api_cache["backoff_sec"] * 2, API_INTERVAL_MAX)
+                    _api_cache["next_call_at"] = time.time() + _api_cache["backoff_sec"]
+            else:
+                _api_cache["backoff_sec"] = min(_api_cache["backoff_sec"] * 2, API_INTERVAL_MAX)
+                _api_cache["next_call_at"] = time.time() + _api_cache["backoff_sec"]
+        else:
+            _api_cache["next_call_at"] = time.time() + API_INTERVAL_OK
+    except Exception as e:
+        print(f"[API] Error: {e}", flush=True)
+        _api_cache["next_call_at"] = time.time() + API_INTERVAL_OK
 
-    # API failed — return cached data if available (max 5 min old)
-    if _api_cache["data"] and (time.time() - _api_cache["fetched_at"]) < 300:
+    # Return cached data if still fresh
+    if _api_cache["data"] and (time.time() - _api_cache["fetched_at"]) < API_CACHE_TTL:
         _api_cache["is_stale"] = True
         return _api_cache["data"], True
     return None, False
@@ -447,24 +512,27 @@ class ClaudeUsageApp(rumps.App):
 
     # ── menu builders ───────────────────────────────────────────────────
 
-    def _rebuild(self):
+    def _rebuild(self, force_api=False):
         self.menu.clear()
         try:
-            self._build_dashboard()
+            self._build_dashboard(force_api=force_api)
         except Exception as e:
             self.menu.add(rumps.MenuItem(f"⚠️ 오류: {e}", callback=None))
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("🔄 새로고침", callback=self._refresh))
+        self._add_settings_menu()
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("종료", callback=rumps.quit_application))
 
-    def _build_dashboard(self):
+    def _build_dashboard(self, force_api=False):
+        config = _load_config()
+
         sess_totals, sess_models, sess_costs = self.tracker.session_usage()
         week_totals, week_models, week_costs = self.tracker.week_usage()
         today_totals, _, _ = self.tracker.today_usage()
 
         # ── fetch real usage from API ──
-        api, api_stale = fetch_usage_api()
+        api, api_stale = fetch_usage_api(force=force_api)
 
         sess_tokens = sess_totals.get("total", 0)
         week_tokens = week_totals.get("total", 0)
@@ -491,12 +559,15 @@ class ClaudeUsageApp(rumps.App):
 
         api_ok = api and "five_hour" in api
 
-        # ── update title bar (current session) ──
-        if api_ok:
-            stale_mark = "~" if api_stale else ""
+        # ── update title bar based on config ──
+        stale_mark = "~" if (api_stale or not api_ok) else ""
+        title_mode = config.get("title_display", "session")
+        if title_mode == "week":
+            self.title = f"⚡ {stale_mark}{week_pct:.0f}%"
+        elif title_mode == "both":
+            self.title = f"⚡ {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
+        else:  # "session" (default)
             self.title = f"⚡ {stale_mark}{sess_pct:.0f}%"
-        else:
-            self.title = f"⚡ ~{sess_pct:.0f}%"
 
         # ── Account info ──
         acct_email = _api_cache.get("account_email")
@@ -517,27 +588,29 @@ class ClaudeUsageApp(rumps.App):
 
         # ── Current session ──
         est = "" if api_ok else " (예상)"
-        self.menu.add(rumps.MenuItem(f"Current session{est}", callback=None))
-        self.menu.add(rumps.MenuItem(f"  {make_bar(sess_pct)}", callback=None))
-        if sess_reset:
-            self.menu.add(rumps.MenuItem(
-                f"  Resets {_fmt_reset(sess_reset)}",
-                callback=None,
-            ))
-        self.menu.add(rumps.separator)
+        if config.get("show_session", True):
+            self.menu.add(rumps.MenuItem(f"Current session{est}", callback=None))
+            self.menu.add(rumps.MenuItem(f"  {make_bar(sess_pct)}", callback=None))
+            if sess_reset:
+                self.menu.add(rumps.MenuItem(
+                    f"  Resets {_fmt_reset(sess_reset)}",
+                    callback=None,
+                ))
+            self.menu.add(rumps.separator)
 
         # ── Current week (all models) ──
-        self.menu.add(rumps.MenuItem(f"Current week (all models){est}", callback=None))
-        self.menu.add(rumps.MenuItem(f"  {make_bar(week_pct)}", callback=None))
-        if week_reset:
-            self.menu.add(rumps.MenuItem(
-                f"  Resets {_fmt_reset(week_reset)}",
-                callback=None,
-            ))
-        self.menu.add(rumps.separator)
+        if config.get("show_week", True):
+            self.menu.add(rumps.MenuItem(f"Current week (all models){est}", callback=None))
+            self.menu.add(rumps.MenuItem(f"  {make_bar(week_pct)}", callback=None))
+            if week_reset:
+                self.menu.add(rumps.MenuItem(
+                    f"  Resets {_fmt_reset(week_reset)}",
+                    callback=None,
+                ))
+            self.menu.add(rumps.separator)
 
         # ── Current week (Sonnet only) ──
-        if sonnet_pct is not None:
+        if config.get("show_sonnet", True) and sonnet_pct is not None:
             self.menu.add(rumps.MenuItem("Current week (Sonnet only)", callback=None))
             self.menu.add(rumps.MenuItem(f"  {make_bar(sonnet_pct)}", callback=None))
             if sonnet_reset:
@@ -601,10 +674,69 @@ class ClaudeUsageApp(rumps.App):
                 ))
             self.menu.add(model_menu)
 
+    # ── settings menu ────────────────────────────────────────────────────
+
+    def _add_settings_menu(self):
+        """Build the ⚙️ 표시 설정 submenu."""
+        config = _load_config()
+        settings = rumps.MenuItem("⚙️ 표시 설정")
+
+        title_mode = config.get("title_display", "session")
+
+        # Title display options (radio-style with check marks)
+        opt_session = rumps.MenuItem(
+            f"{'✓ ' if title_mode == 'session' else '   '}타이틀: 세션",
+            callback=lambda _: self._set_title_display("session"),
+        )
+        opt_week = rumps.MenuItem(
+            f"{'✓ ' if title_mode == 'week' else '   '}타이틀: 주간",
+            callback=lambda _: self._set_title_display("week"),
+        )
+        opt_both = rumps.MenuItem(
+            f"{'✓ ' if title_mode == 'both' else '   '}타이틀: 둘 다",
+            callback=lambda _: self._set_title_display("both"),
+        )
+        settings.add(opt_session)
+        settings.add(opt_week)
+        settings.add(opt_both)
+        settings.add(rumps.separator)
+
+        # Dropdown section toggles
+        show_sess = config.get("show_session", True)
+        show_week = config.get("show_week", True)
+        show_sonnet = config.get("show_sonnet", True)
+
+        settings.add(rumps.MenuItem(
+            f"{'✓ ' if show_sess else '   '}세션 표시",
+            callback=lambda _: self._toggle_config("show_session"),
+        ))
+        settings.add(rumps.MenuItem(
+            f"{'✓ ' if show_week else '   '}주간 표시",
+            callback=lambda _: self._toggle_config("show_week"),
+        ))
+        settings.add(rumps.MenuItem(
+            f"{'✓ ' if show_sonnet else '   '}소넷 표시",
+            callback=lambda _: self._toggle_config("show_sonnet"),
+        ))
+
+        self.menu.add(settings)
+
+    def _set_title_display(self, mode):
+        config = _load_config()
+        config["title_display"] = mode
+        _save_config(config)
+        self._rebuild()
+
+    def _toggle_config(self, key):
+        config = _load_config()
+        config[key] = not config.get(key, True)
+        _save_config(config)
+        self._rebuild()
+
     # ── callbacks ───────────────────────────────────────────────────────
 
     def _refresh(self, _=None):
-        self._rebuild()
+        self._rebuild(force_api=True)
 
     def _on_tick(self, _=None):
         try:

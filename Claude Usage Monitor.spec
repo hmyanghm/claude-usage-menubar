@@ -46,7 +46,8 @@ app = BUNDLE(
     bundle_identifier='com.claude.usage-monitor',
     info_plist={
         'CFBundleDisplayName': 'Claude Usage Monitor',
-        'CFBundleShortVersionString': '1.0.1',
+        'CFBundleShortVersionString': '1.0.2',
         'NSHighResolutionCapable': True,
+        'LSUIElement': True,
     },
 )

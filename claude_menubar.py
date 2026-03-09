@@ -102,7 +102,7 @@ _api_cache = {
     "backoff_sec": 90,      # current backoff interval (grows on 429)
 }
 
-API_INTERVAL_OK = 90        # normal: call every 1.5 min
+API_INTERVAL_OK = 300       # normal: call every 5 min
 API_INTERVAL_MAX = 600      # max backoff: 10 min
 API_CACHE_TTL = 600         # cache valid for 10 min
 
@@ -154,7 +154,7 @@ def _fetch_profile(token):
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "anthropic-beta": ANTHROPIC_BETA,
-            "User-Agent": "claude-code-menubar/1.0",
+            "User-Agent": "claude-code/2.1.59",
         })
         with urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
@@ -200,7 +200,7 @@ def fetch_usage_api(force=False):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "anthropic-beta": ANTHROPIC_BETA,
-        "User-Agent": "claude-code-menubar/1.0",
+        "User-Agent": "claude-code/2.1.59",
     }
     try:
         req = Request(USAGE_API_URL, headers=headers)
@@ -222,8 +222,8 @@ def fetch_usage_api(force=False):
                 retry_after = e.headers.get("retry-after")
             if retry_after:
                 try:
-                    wait = int(retry_after)
-                    print(f"[API] retry-after: {wait}s", flush=True)
+                    wait = max(int(retry_after), API_INTERVAL_OK)
+                    print(f"[API] retry-after: {retry_after}s → waiting {wait}s", flush=True)
                     _api_cache["next_call_at"] = time.time() + wait
                     _api_cache["backoff_sec"] = wait
                 except ValueError:
@@ -503,10 +503,16 @@ class ClaudeUsageApp(rumps.App):
     def _initial_load(self, timer):
         """First load after run loop starts, then switch to normal refresh interval."""
         timer.stop()
+        # Hide Dock icon (must be after run loop starts)
         try:
-            self._rebuild()
+            import AppKit
+            AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
         except Exception:
             pass
+        try:
+            self._rebuild()
+        except Exception as e:
+            print(f"[DEBUG] _initial_load error: {e}", flush=True)
         self._refresh_timer = rumps.Timer(self._on_tick, REFRESH_INTERVAL_SEC)
         self._refresh_timer.start()
 

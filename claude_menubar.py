@@ -24,7 +24,7 @@ import rumps
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
-REFRESH_INTERVAL_SEC = 30
+REFRESH_INTERVAL_SEC = 300
 
 CONFIG_PATH = CLAUDE_DIR / "menubar_config.json"
 DEFAULT_CONFIG = {
@@ -509,12 +509,44 @@ class ClaudeUsageApp(rumps.App):
             AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
         except Exception:
             pass
+        # Register wake-from-sleep notification
+        self._register_wake_observer()
         try:
             self._rebuild()
         except Exception as e:
             print(f"[DEBUG] _initial_load error: {e}", flush=True)
         self._refresh_timer = rumps.Timer(self._on_tick, REFRESH_INTERVAL_SEC)
         self._refresh_timer.start()
+
+    def _register_wake_observer(self):
+        """Listen for macOS wake-from-sleep to trigger immediate refresh."""
+        try:
+            import AppKit
+            import objc
+
+            def on_wake(_notification):
+                print("[WAKE] System woke from sleep, refreshing...", flush=True)
+                # Small delay to let network come back up
+                rumps.Timer(self._wake_refresh, 5).start()
+
+            nc = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
+            nc.addObserverForName_object_queue_usingBlock_(
+                "NSWorkspaceDidWakeNotification",
+                None,
+                None,
+                on_wake,
+            )
+            print("[WAKE] Registered wake observer", flush=True)
+        except Exception as e:
+            print(f"[WAKE] Failed to register wake observer: {e}", flush=True)
+
+    def _wake_refresh(self, timer):
+        """Called once after wake-from-sleep."""
+        timer.stop()
+        try:
+            self._rebuild(force_api=True)
+        except Exception as e:
+            print(f"[WAKE] Refresh error: {e}", flush=True)
 
     # ── menu builders ───────────────────────────────────────────────────
 

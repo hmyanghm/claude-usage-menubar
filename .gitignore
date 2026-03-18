@@ -4,3 +4,8 @@ dist/
 *.dmg
 __pycache__/
 *.pyc
+
+# Claude Code
+.claude/handoff.md
+.claude/checkpoints/
+.claude/web-checklist-state.json

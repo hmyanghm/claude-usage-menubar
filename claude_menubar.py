@@ -22,6 +22,12 @@ import rumps
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
+APP_VERSION = "1.0.5"
+GITHUB_REPO = "hmyanghm/claude-usage-menubar"
+GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+UPDATE_CHECK_INTERVAL = 3600  # check every 1 hour
+
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 REFRESH_INTERVAL_SEC = 300
@@ -112,6 +118,52 @@ API_CACHE_TTL = 600         # cache valid for 10 min
 
 PROFILE_API_URL = "https://api.anthropic.com/api/oauth/profile"
 
+# ─── Update checker ──────────────────────────────────────────────────────────
+
+_update_cache = {
+    "latest_version": None,
+    "release_url": None,
+    "checked_at": 0,
+}
+
+
+def _parse_version(tag):
+    """Parse version string like 'v1.0.5' or '1.0.5' into tuple of ints."""
+    tag = tag.lstrip("v")
+    try:
+        return tuple(int(x) for x in tag.split("."))
+    except (ValueError, AttributeError):
+        return (0, 0, 0)
+
+
+def _check_update():
+    """Check GitHub releases for a newer version. Returns (new_version, url) or (None, None)."""
+    now = time.time()
+    if now - _update_cache["checked_at"] < UPDATE_CHECK_INTERVAL:
+        v = _update_cache["latest_version"]
+        if v and _parse_version(v) > _parse_version(APP_VERSION):
+            return v, _update_cache["release_url"]
+        return None, None
+
+    _update_cache["checked_at"] = now
+    try:
+        req = Request(GITHUB_API_RELEASES, headers={
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": f"claude-usage-menubar/{APP_VERSION}",
+        })
+        with urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        tag = data.get("tag_name", "")
+        url = data.get("html_url", GITHUB_RELEASES_PAGE)
+        _update_cache["latest_version"] = tag
+        _update_cache["release_url"] = url
+        if _parse_version(tag) > _parse_version(APP_VERSION):
+            print(f"[UPDATE] New version available: {tag}", flush=True)
+            return tag, url
+    except Exception as e:
+        print(f"[UPDATE] Check failed: {e}", flush=True)
+    return None, None
+
 
 def _send_notification(title, message):
     """Send macOS notification via osascript."""
@@ -120,6 +172,14 @@ def _send_notification(title, message):
         subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
     except Exception as e:
         print(f"[ALERT] Notification failed: {e}", flush=True)
+
+
+def _open_url(url):
+    """Open a URL in the default browser."""
+    try:
+        subprocess.run(["open", url], capture_output=True, timeout=5)
+    except Exception as e:
+        print(f"[URL] Failed to open: {e}", flush=True)
 TOKEN_REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
@@ -757,7 +817,15 @@ class ClaudeUsageApp(rumps.App):
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("🔄 새로고침", callback=self._refresh))
         self._add_settings_menu()
+        # Update check
+        new_ver, release_url = _check_update()
+        if new_ver:
+            self.menu.add(rumps.MenuItem(
+                f"🔔 업데이트 {new_ver} 사용 가능",
+                callback=lambda _: _open_url(release_url),
+            ))
         self.menu.add(rumps.separator)
+        self.menu.add(rumps.MenuItem(f"v{APP_VERSION}", callback=None))
         self.menu.add(rumps.MenuItem("종료", callback=rumps.quit_application))
 
     def _build_dashboard(self, force_api=False):

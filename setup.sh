@@ -75,3 +75,7 @@ echo "     launchctl unload $PLIST 2>/dev/null"
 echo "     rm -rf ~/.claude-menubar"
 echo "     rm -f $PLIST"
 echo ""
+
+# Auto-launch
+echo "🚀 앱을 실행합니다..."
+nohup "$INSTALL_DIR/launch.sh" > /dev/null 2>&1 &

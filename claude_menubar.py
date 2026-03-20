@@ -32,7 +32,11 @@ DEFAULT_CONFIG = {
     "show_session": True,
     "show_week": True,
     "show_sonnet": True,
+    "alert_enabled": True,        # usage threshold alerts on/off
 }
+
+# Alert thresholds (percent) — triggers macOS notification once per reset cycle
+ALERT_THRESHOLDS = [80, 90]
 
 
 def _load_config():
@@ -109,12 +113,28 @@ API_CACHE_TTL = 600         # cache valid for 10 min
 PROFILE_API_URL = "https://api.anthropic.com/api/oauth/profile"
 
 
+def _send_notification(title, message):
+    """Send macOS notification via osascript."""
+    try:
+        script = f'display notification "{message}" with title "{title}" sound name "default"'
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=5)
+    except Exception as e:
+        print(f"[ALERT] Notification failed: {e}", flush=True)
+TOKEN_REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+
+def _get_keychain_account():
+    """Return the macOS Keychain account name for Claude Code credentials."""
+    return os.environ.get("USER", "claude-code-user")
+
+
 def _get_oauth_data():
     """Retrieve full OAuth data from macOS Keychain."""
-    account = os.environ.get("USER", "claude-code-user")
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-a", account, "-w", "-s", "Claude Code-credentials"],
+            ["security", "find-generic-password", "-a", _get_keychain_account(),
+             "-w", "-s", "Claude Code-credentials"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -124,8 +144,101 @@ def _get_oauth_data():
         return None
 
 
+def _save_oauth_data(data):
+    """Save updated OAuth data back to macOS Keychain."""
+    account = _get_keychain_account()
+    service = "Claude Code-credentials"
+    payload = json.dumps(data)
+    try:
+        # Delete old entry first (update not supported directly)
+        subprocess.run(
+            ["security", "delete-generic-password", "-a", account, "-s", service],
+            capture_output=True, text=True, timeout=5,
+        )
+        # Add new entry
+        subprocess.run(
+            ["security", "add-generic-password", "-a", account, "-s", service,
+             "-w", payload],
+            capture_output=True, text=True, timeout=5,
+        )
+        print("[OAuth] Keychain updated with refreshed token", flush=True)
+    except Exception as e:
+        print(f"[OAuth] Keychain save error: {e}", flush=True)
+
+
+def _is_token_expired(oauth_data):
+    """Check if access token is expired or about to expire (within 5 min)."""
+    expires_at = oauth_data.get("expiresAt")
+    if not expires_at:
+        return False
+    # expiresAt is in milliseconds
+    now_ms = int(time.time() * 1000)
+    margin_ms = 5 * 60 * 1000  # 5 minutes margin
+    return now_ms >= (expires_at - margin_ms)
+
+
+def _refresh_oauth_token(keychain_data, oauth_data):
+    """Refresh the OAuth access token using the refresh token.
+    Returns new access token on success, None on failure.
+    Updates Keychain with new tokens.
+    """
+    refresh_token = oauth_data.get("refreshToken")
+    if not refresh_token:
+        print("[OAuth] No refresh token available", flush=True)
+        return None
+
+    try:
+        body = json.dumps({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": OAUTH_CLIENT_ID,
+        }).encode()
+        req = Request(TOKEN_REFRESH_URL, data=body, headers={
+            "Content-Type": "application/json",
+            "User-Agent": "claude-code/2.1.80",
+        })
+        with urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+
+        new_access = result.get("access_token")
+        new_refresh = result.get("refresh_token")
+        expires_in = result.get("expires_in", 28800)  # default 8h
+
+        if not new_access:
+            print("[OAuth] Refresh response missing access_token", flush=True)
+            return None
+
+        # Update oauth data
+        updated_oauth = {
+            **oauth_data,
+            "accessToken": new_access,
+            "expiresAt": int(time.time() * 1000) + (expires_in * 1000),
+        }
+        if new_refresh:
+            updated_oauth["refreshToken"] = new_refresh
+
+        # Update account info from response if available
+        account_info = result.get("account", {})
+        org_info = result.get("organization", {})
+        if org_info.get("rateLimitTier"):
+            updated_oauth["rateLimitTier"] = org_info["rateLimitTier"]
+        if account_info.get("subscriptionType"):
+            updated_oauth["subscriptionType"] = account_info["subscriptionType"]
+
+        updated_data = {**keychain_data, "claudeAiOauth": updated_oauth}
+        _save_oauth_data(updated_data)
+        print(f"[OAuth] Token refreshed, expires in {expires_in}s", flush=True)
+        return new_access
+
+    except Exception as e:
+        print(f"[OAuth] Token refresh failed: {e}", flush=True)
+        return None
+
+
 def _get_oauth_token():
-    """Retrieve Claude Code OAuth access token from macOS Keychain."""
+    """Retrieve Claude Code OAuth access token from macOS Keychain.
+    Automatically refreshes if expired.
+    """
     data = _get_oauth_data()
     if not data:
         return None
@@ -134,7 +247,20 @@ def _get_oauth_token():
     tier = oauth.get("rateLimitTier")
     if tier:
         _api_cache["rate_limit_tier"] = tier
-    return oauth.get("accessToken")
+
+    token = oauth.get("accessToken")
+    if not token:
+        return None
+
+    # Auto-refresh if expired
+    if _is_token_expired(oauth):
+        print("[OAuth] Token expired, attempting refresh...", flush=True)
+        new_token = _refresh_oauth_token(data, oauth)
+        if new_token:
+            return new_token
+        # Refresh failed — return old token anyway (might still work)
+
+    return token
 
 
 def _estimate_limits():
@@ -215,7 +341,21 @@ def fetch_usage_api(force=False):
             return data, False
     except URLError as e:
         print(f"[API] URLError: {e}", flush=True)
-        if hasattr(e, "code") and e.code == 429:
+        status = getattr(e, "code", None)
+        if status == 401:
+            # Token expired during runtime — force refresh and retry once
+            print("[API] 401 Unauthorized — attempting token refresh", flush=True)
+            kc_data = _get_oauth_data()
+            if kc_data:
+                oauth = kc_data.get("claudeAiOauth", {})
+                new_token = _refresh_oauth_token(kc_data, oauth)
+                if new_token:
+                    _api_cache["token_prefix"] = new_token[:20]
+                    _api_cache["next_call_at"] = 0  # allow immediate retry
+                    # Retry with the new token (non-recursive via force)
+                    return fetch_usage_api(force=True)
+            _api_cache["next_call_at"] = time.time() + API_INTERVAL_OK
+        elif status == 429:
             # Use retry-after header if available, otherwise exponential backoff
             retry_after = None
             if hasattr(e, "headers"):
@@ -494,6 +634,11 @@ class ClaudeUsageApp(rumps.App):
         super().__init__(name="Claude Usage", title="⚡ Claude", quit_button=None)
         self.tracker = UsageTracker()
         self.view_mode = "dashboard"  # dashboard | detail
+        # Track which alert thresholds have already fired per reset cycle
+        # Keys: "session", "week" — Values: set of thresholds already notified
+        self._alerted = {"session": set(), "week": set()}
+        # Store last known reset times to detect new cycles
+        self._last_reset = {"session": None, "week": None}
         # Defer heavy work (API calls, file I/O) to after the run loop starts
         self.menu.add(rumps.MenuItem("로딩 중...", callback=None))
         self.menu.add(rumps.separator)
@@ -596,6 +741,9 @@ class ClaudeUsageApp(rumps.App):
             sonnet_reset = None
 
         api_ok = api and "five_hour" in api
+
+        # ── check threshold alerts ──
+        self._check_alerts(sess_pct, sess_reset, week_pct, week_reset)
 
         # ── update title bar based on config ──
         stale_mark = "~" if (api_stale or not api_ok) else ""
@@ -712,6 +860,36 @@ class ClaudeUsageApp(rumps.App):
                 ))
             self.menu.add(model_menu)
 
+    # ── threshold alerts ─────────────────────────────────────────────────
+
+    def _check_alerts(self, sess_pct, sess_reset, week_pct, week_reset):
+        """Send macOS notification when usage crosses a threshold.
+        Each threshold fires only once per reset cycle.
+        """
+        config = _load_config()
+        if not config.get("alert_enabled", True):
+            return
+
+        checks = [
+            ("session", "세션(5h)", sess_pct, sess_reset),
+            ("week", "주간(7d)", week_pct, week_reset),
+        ]
+        for key, label, pct, reset_time in checks:
+            # Detect reset cycle change → clear previous alerts
+            if reset_time != self._last_reset[key]:
+                self._alerted[key] = set()
+                self._last_reset[key] = reset_time
+
+            for threshold in ALERT_THRESHOLDS:
+                if pct >= threshold and threshold not in self._alerted[key]:
+                    self._alerted[key].add(threshold)
+                    reset_msg = f" | 리셋: {_fmt_reset(reset_time)}" if reset_time else ""
+                    _send_notification(
+                        title=f"⚡ Claude 사용량 {threshold}% 도달",
+                        message=f"{label} 사용률: {pct:.0f}%{reset_msg}",
+                    )
+                    print(f"[ALERT] {label} {pct:.0f}% >= {threshold}%", flush=True)
+
     # ── settings menu ────────────────────────────────────────────────────
 
     def _add_settings_menu(self):
@@ -755,6 +933,14 @@ class ClaudeUsageApp(rumps.App):
         settings.add(rumps.MenuItem(
             f"{'✓ ' if show_sonnet else '   '}소넷 표시",
             callback=lambda _: self._toggle_config("show_sonnet"),
+        ))
+        settings.add(rumps.separator)
+
+        # Alert toggle
+        alert_on = config.get("alert_enabled", True)
+        settings.add(rumps.MenuItem(
+            f"{'✓ ' if alert_on else '   '}사용량 알림 (80%/90%)",
+            callback=lambda _: self._toggle_config("alert_enabled"),
         ))
 
         self.menu.add(settings)

@@ -423,6 +423,19 @@ def fmt_cost(usd):
     return f"${usd:.4f}"
 
 
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+
+def make_sparkline(values):
+    """Create a sparkline string from a list of numbers."""
+    if not values or max(values) == 0:
+        return "▁" * len(values)
+    hi = max(values)
+    return "".join(
+        SPARK_CHARS[min(int(v / hi * (len(SPARK_CHARS) - 1)), len(SPARK_CHARS) - 1)]
+        for v in values
+    )
+
+
 # ─── JSONL Parser ────────────────────────────────────────────────────────────
 
 class UsageTracker:
@@ -606,6 +619,46 @@ class UsageTracker:
     def month_usage(self):
         since = datetime.now() - timedelta(days=30)
         return self.query(since)
+
+    def daily_costs(self, days=7):
+        """Return list of (date_str, cost_usd) for the last N days."""
+        since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+        # Collect per-day cost buckets
+        day_costs = defaultdict(float)
+        for fp in self._jsonl_files():
+            try:
+                if datetime.fromtimestamp(fp.stat().st_mtime) < since:
+                    continue
+            except OSError:
+                continue
+            try:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        if not line.strip():
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        ts_raw = entry.get("timestamp") or entry.get("createdAt") or entry.get("time")
+                        dt = self._parse_ts(ts_raw)
+                        if not dt or dt < since:
+                            continue
+                        rec = self._extract_usage(entry)
+                        if rec is None:
+                            continue
+                        rec.pop("msg_id", None)
+                        day_costs[dt.strftime("%m/%d")] += self._cost_of(rec)
+            except (PermissionError, FileNotFoundError):
+                continue
+
+        # Build ordered list for the last N days
+        result = []
+        for i in range(days):
+            d = since + timedelta(days=i)
+            key = d.strftime("%m/%d")
+            result.append((key, day_costs.get(key, 0.0)))
+        return result
 
 
 # ─── Reset-time helpers ──────────────────────────────────────────────────────
@@ -859,6 +912,23 @@ class ClaudeUsageApp(rumps.App):
                     callback=None,
                 ))
             self.menu.add(model_menu)
+
+        # ── Usage history sparkline (submenu) ──
+        daily = self.tracker.daily_costs(7)
+        costs = [c for _, c in daily]
+        spark = make_sparkline(costs)
+        total_7d = sum(costs)
+        history_menu = rumps.MenuItem(f"📈 7일  {spark}  {fmt_cost(total_7d)}")
+        for date_str, cost in daily:
+            bar_len = 0
+            if max(costs) > 0:
+                bar_len = round(cost / max(costs) * 10)
+            bar = "█" * bar_len + "░" * (10 - bar_len)
+            history_menu.add(rumps.MenuItem(
+                f"  {date_str}  {bar}  {fmt_cost(cost)}",
+                callback=None,
+            ))
+        self.menu.add(history_menu)
 
     # ── threshold alerts ─────────────────────────────────────────────────
 

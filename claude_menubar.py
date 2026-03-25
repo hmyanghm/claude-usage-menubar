@@ -401,8 +401,8 @@ def fetch_usage_api(force=False):
             return data, False
     except URLError as e:
         print(f"[API] URLError: {e}", flush=True)
-        status = getattr(e, "code", None)
-        if status == 401:
+        status = getattr(e, "code", None) or getattr(getattr(e, "reason", None), "status", None)
+        if status == 401 and not force:
             # Token expired during runtime — force refresh and retry once
             print("[API] 401 Unauthorized — attempting token refresh", flush=True)
             kc_data = _get_oauth_data()
@@ -412,8 +412,12 @@ def fetch_usage_api(force=False):
                 if new_token:
                     _api_cache["token_prefix"] = new_token[:20]
                     _api_cache["next_call_at"] = 0  # allow immediate retry
-                    # Retry with the new token (non-recursive via force)
+                    # Retry with the new token (one retry only via force=True)
                     return fetch_usage_api(force=True)
+            _api_cache["next_call_at"] = time.time() + API_INTERVAL_OK
+        elif status == 401 and force:
+            # Already retried once with refreshed token, don't loop
+            print("[API] 401 persists after token refresh, backing off", flush=True)
             _api_cache["next_call_at"] = time.time() + API_INTERVAL_OK
         elif status == 429:
             # Use retry-after header if available, otherwise exponential backoff
@@ -782,33 +786,63 @@ class ClaudeUsageApp(rumps.App):
             import AppKit
             import objc
 
+            self._wake_retry_count = 0
+            self._wake_retry_timer = None
+            self._last_active_time = time.time()
+
+            # Store callback as instance attribute to prevent GC
             def on_wake(_notification):
-                print("[WAKE] System woke from sleep, refreshing...", flush=True)
-                # Small delay to let network come back up
-                rumps.Timer(self._wake_refresh, 5).start()
+                print("[WAKE] System woke from sleep, scheduling refresh...", flush=True)
+                self._wake_retry_count = 0
+                self._start_wake_retry()
+
+            self._on_wake_callback = on_wake  # prevent garbage collection
 
             nc = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
             nc.addObserverForName_object_queue_usingBlock_(
                 "NSWorkspaceDidWakeNotification",
                 None,
                 None,
-                on_wake,
+                self._on_wake_callback,
             )
             print("[WAKE] Registered wake observer", flush=True)
         except Exception as e:
             print(f"[WAKE] Failed to register wake observer: {e}", flush=True)
 
+    def _start_wake_retry(self):
+        """Start retry cycle after wake. Delays: 5s, 10s, 20s, 40s, 60s (max 5 retries)."""
+        if self._wake_retry_timer is not None:
+            self._wake_retry_timer.stop()
+        delays = [5, 10, 20, 40, 60]
+        delay = delays[min(self._wake_retry_count, len(delays) - 1)]
+        print(f"[WAKE] Retry #{self._wake_retry_count + 1} in {delay}s...", flush=True)
+        self._wake_retry_timer = rumps.Timer(self._wake_refresh, delay)
+        self._wake_retry_timer.start()
+
     def _wake_refresh(self, timer):
-        """Called once after wake-from-sleep."""
+        """Called after wake-from-sleep. Retries on failure until network is back."""
         timer.stop()
+        self._wake_retry_timer = None
+        max_retries = 5
         try:
+            # Skip network pre-check, just rebuild directly
+            print("[WAKE] Attempting refresh...", flush=True)
             self._rebuild(force_api=True)
+            self._wake_retry_count = 0
+            print("[WAKE] Refresh successful", flush=True)
         except Exception as e:
-            print(f"[WAKE] Refresh error: {e}", flush=True)
+            self._wake_retry_count += 1
+            if self._wake_retry_count < max_retries:
+                print(f"[WAKE] Refresh failed ({e}), will retry...", flush=True)
+                self._start_wake_retry()
+            else:
+                print(f"[WAKE] Max retries reached, giving up. Next regular tick will retry.", flush=True)
+                self._wake_retry_count = 0
 
     # ── menu builders ───────────────────────────────────────────────────
 
     def _rebuild(self, force_api=False):
+        self._last_active_time = time.time()
         self.menu.clear()
         try:
             self._build_dashboard(force_api=force_api)
@@ -1102,7 +1136,15 @@ class ClaudeUsageApp(rumps.App):
 
     def _on_tick(self, _=None):
         try:
-            self._rebuild()
+            # Detect wake-from-sleep via elapsed time gap
+            # If more time passed than 2x the refresh interval, we likely slept
+            now = time.time()
+            last = getattr(self, "_last_active_time", now)
+            self._last_active_time = now
+            was_sleeping = (now - last) > REFRESH_INTERVAL_SEC * 2
+            if was_sleeping:
+                print(f"[WAKE] Detected sleep gap ({now - last:.0f}s), forcing API refresh...", flush=True)
+            self._rebuild(force_api=was_sleeping)
         except Exception:
             pass
 

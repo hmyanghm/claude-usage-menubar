@@ -8,8 +8,11 @@ and reads local JSONL session files for detailed token/cost breakdowns.
 
 import json
 import os
+import sys
 import glob
 import time
+import tempfile
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,7 +25,7 @@ import rumps
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -163,6 +166,153 @@ def _check_update():
     except Exception as e:
         print(f"[UPDATE] Check failed: {e}", flush=True)
     return None, None
+
+
+def _get_running_script_path():
+    """Detect the actual path of the currently running claude_menubar.py."""
+    # __file__ gives us the real path of the running script
+    current = Path(__file__).resolve()
+    if current.name == "claude_menubar.py":
+        return current
+    # Fallback: setup.sh installed location
+    fallback = Path.home() / ".claude-menubar" / "claude_menubar.py"
+    if fallback.exists():
+        return fallback
+    return None
+
+
+def _is_git_repo(script_path):
+    """Check if the script lives inside a git repository."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=script_path.parent, capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _download_source_tarball(tag):
+    """Download and extract the GitHub source tarball for a given tag.
+    Returns the extracted directory path, or None on failure.
+    """
+    tarball_url = f"https://github.com/{GITHUB_REPO}/archive/refs/tags/{tag}.tar.gz"
+    tmp_dir = tempfile.mkdtemp(prefix="claude-update-")
+    tar_path = os.path.join(tmp_dir, "source.tar.gz")
+
+    try:
+        print(f"[UPDATE] Downloading source {tag}...", flush=True)
+        req = Request(tarball_url, headers={
+            "User-Agent": f"claude-usage-menubar/{APP_VERSION}",
+        })
+        with urlopen(req, timeout=30) as resp:
+            with open(tar_path, "wb") as f:
+                f.write(resp.read())
+
+        # Extract
+        subprocess.run(
+            ["tar", "xzf", tar_path, "-C", tmp_dir],
+            capture_output=True, timeout=15, check=True,
+        )
+
+        # Find extracted directory (e.g. claude-usage-menubar-v1.0.8/)
+        for item in os.listdir(tmp_dir):
+            item_path = os.path.join(tmp_dir, item)
+            if os.path.isdir(item_path) and item != "__MACOSX":
+                setup_sh = os.path.join(item_path, "setup.sh")
+                if os.path.exists(setup_sh):
+                    return item_path
+        print("[UPDATE] setup.sh not found in tarball", flush=True)
+        return None
+    except Exception as e:
+        print(f"[UPDATE] Tarball download failed: {e}", flush=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
+
+
+def _auto_update(new_ver):
+    """Auto-update the app regardless of installation method."""
+    script_path = _get_running_script_path()
+
+    # git clone → git pull
+    if script_path and _is_git_repo(script_path):
+        return _auto_update_git(new_ver, script_path)
+
+    # setup.sh install or .app bundle → download source & run setup.sh
+    return _auto_update_setup(new_ver)
+
+
+def _auto_update_git(new_ver, script_path):
+    """Update via git pull when running from a cloned repo."""
+    try:
+        repo_dir = script_path.parent
+        print(f"[UPDATE] Git pull in {repo_dir}...", flush=True)
+        result = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            print(f"[UPDATE] git pull failed: {result.stderr}", flush=True)
+            return False
+
+        print(f"[UPDATE] Git updated to {new_ver}, restarting...", flush=True)
+        _send_notification("업데이트 완료", f"{new_ver} git pull 완료, 앱을 재시작합니다")
+        _restart_app()
+        return True
+    except Exception as e:
+        print(f"[UPDATE] Git update failed: {e}", flush=True)
+        return False
+
+
+def _auto_update_setup(new_ver):
+    """Download source tarball and run setup.sh to update."""
+    tag = _update_cache.get("latest_version")
+    if not tag:
+        print("[UPDATE] No version tag available", flush=True)
+        return False
+
+    source_dir = _download_source_tarball(tag)
+    if not source_dir:
+        return False
+
+    try:
+        setup_sh = os.path.join(source_dir, "setup.sh")
+        print(f"[UPDATE] Running setup.sh from {source_dir}...", flush=True)
+        result = subprocess.run(
+            ["bash", setup_sh],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            print(f"[UPDATE] setup.sh failed: {result.stderr}", flush=True)
+            return False
+
+        print(f"[UPDATE] Updated to {new_ver} via setup.sh", flush=True)
+        _send_notification("업데이트 완료", f"{new_ver} 설치 완료, 앱을 재시작합니다")
+
+        # Cleanup
+        shutil.rmtree(os.path.dirname(source_dir), ignore_errors=True)
+
+        _restart_app()
+        return True
+    except Exception as e:
+        print(f"[UPDATE] setup.sh update failed: {e}", flush=True)
+        shutil.rmtree(os.path.dirname(source_dir), ignore_errors=True)
+        return False
+
+
+def _restart_app():
+    """Restart the app and quit the current process."""
+    install_dir = Path.home() / ".claude-menubar"
+    launch_sh = install_dir / "launch.sh"
+
+    if launch_sh.exists():
+        subprocess.Popen([str(launch_sh)], start_new_session=True)
+    else:
+        script_path = _get_running_script_path()
+        if script_path:
+            subprocess.Popen([sys.executable, str(script_path)], start_new_session=True)
+    rumps.quit_application()
 
 
 def _send_notification(title, message):
@@ -855,7 +1005,11 @@ class ClaudeUsageApp(rumps.App):
         new_ver, release_url = _check_update()
         if new_ver:
             self.menu.add(rumps.MenuItem(
-                f"🔔 업데이트 {new_ver} 사용 가능",
+                f"⬆️ {new_ver} 자동 업데이트",
+                callback=lambda _, v=new_ver: _auto_update(v),
+            ))
+            self.menu.add(rumps.MenuItem(
+                f"🔔 {new_ver} 릴리즈 노트",
                 callback=lambda _: _open_url(release_url),
             ))
         self.menu.add(rumps.separator)

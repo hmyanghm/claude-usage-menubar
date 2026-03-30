@@ -304,16 +304,25 @@ def _auto_update_setup(new_ver):
 
 
 def _restart_app():
-    """Restart the app and quit the current process."""
+    """Quit current process and relaunch after a short delay."""
     install_dir = Path.home() / ".claude-menubar"
     launch_sh = install_dir / "launch.sh"
 
     if launch_sh.exists():
-        subprocess.Popen([str(launch_sh)], start_new_session=True)
+        relaunch_cmd = str(launch_sh)
     else:
         script_path = _get_running_script_path()
         if script_path:
-            subprocess.Popen([sys.executable, str(script_path)], start_new_session=True)
+            relaunch_cmd = f"{sys.executable} {script_path}"
+        else:
+            rumps.quit_application()
+            return
+
+    # Use shell to wait 2 seconds then relaunch, so current process exits first
+    subprocess.Popen(
+        f"sleep 2 && {relaunch_cmd}",
+        shell=True, start_new_session=True,
+    )
     rumps.quit_application()
 
 

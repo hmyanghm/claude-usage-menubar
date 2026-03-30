@@ -76,6 +76,8 @@ echo "     rm -rf ~/.claude-menubar"
 echo "     rm -f $PLIST"
 echo ""
 
-# Auto-launch
-echo "🚀 앱을 실행합니다..."
-nohup "$INSTALL_DIR/launch.sh" > /dev/null 2>&1 &
+# Auto-launch (skip if called from auto-update)
+if [ -z "$CLAUDE_AUTO_UPDATE" ]; then
+    echo "🚀 앱을 실행합니다..."
+    nohup "$INSTALL_DIR/launch.sh" > /dev/null 2>&1 &
+fi

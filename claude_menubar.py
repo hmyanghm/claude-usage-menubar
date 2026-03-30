@@ -279,9 +279,11 @@ def _auto_update_setup(new_ver):
     try:
         setup_sh = os.path.join(source_dir, "setup.sh")
         print(f"[UPDATE] Running setup.sh from {source_dir}...", flush=True)
+        env = os.environ.copy()
+        env["CLAUDE_AUTO_UPDATE"] = "1"
         result = subprocess.run(
             ["bash", setup_sh],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, env=env,
         )
         if result.returncode != 0:
             print(f"[UPDATE] setup.sh failed: {result.stderr}", flush=True)

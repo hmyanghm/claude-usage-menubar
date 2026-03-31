@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"

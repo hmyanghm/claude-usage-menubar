@@ -1,7 +1,7 @@
 # Claude Usage Monitor
 
 ## Overview
-macOS 메뉴바에서 Claude Code 사용량을 실시간으로 보여주는 앱 (v1.0.8)
+macOS 메뉴바 / Windows 시스템 트레이에서 Claude Code 사용량을 실시간으로 보여주는 앱 (v1.0.9)
 
 ## Tech Stack
 - Python 3 + rumps (macOS menubar framework)

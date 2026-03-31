@@ -1,7 +1,7 @@
 # Claude Usage Monitor
 
 ## Overview
-macOS 메뉴바 / Windows 시스템 트레이에서 Claude Code 사용량을 실시간으로 보여주는 앱 (v1.0.9)
+macOS 메뉴바 / Windows 시스템 트레이에서 Claude Code 사용량을 실시간으로 보여주는 앱 (v1.1.0)
 
 ## Tech Stack
 - Python 3 + rumps (macOS menubar framework)
@@ -17,8 +17,10 @@ macOS 메뉴바 / Windows 시스템 트레이에서 Claude Code 사용량을 실
 
 ## Directory Structure
 ```
-claude_menubar.py          # 메인 앱 (단일 파일)
-setup.sh                   # 설치 스크립트
+claude_menubar.py          # macOS 앱 (rumps 기반)
+claude_menubar_windows.py  # Windows 앱 (pystray 기반)
+setup.sh                   # macOS 설치 스크립트
+setup_windows.bat          # Windows 설치 스크립트
 build_dmg.sh               # PyInstaller 빌드 → DMG
 Claude Usage Monitor.spec  # PyInstaller 설정
 app_icon.icns              # 앱 아이콘
@@ -31,6 +33,16 @@ app_icon.icns              # 앱 아이콘
 - 설정 파일: `~/.claude/menubar_config.json`
 
 ## Conventions
-- 한국어 UI, 영어 코드/주석
-- 단일 파일 구조 (claude_menubar.py)
+- 한국어 UI (macOS), 영어 UI (Windows), 영어 코드/주석
 - 커밋 메시지: `<type>: <한국어 설명>`
+
+## Cross-platform Rules
+- **기능 수정 시 macOS(`claude_menubar.py`)와 Windows(`claude_menubar_windows.py`) 양쪽 모두에 적용할 것**
+- macOS: `rumps` 기반 메뉴바 앱
+- Windows: `pystray` 기반 시스템 트레이 앱
+- 공통 로직(UsageTracker, API 호출, 추천 등)은 양쪽 파일에 동일하게 유지
+
+## Release Rules
+- 푸시 요청 시 `main` 브랜치에 push하고, GitHub 릴리스도 함께 생성
+- 릴리스 태그는 플랫폼별로 분리: `v{버전}-mac`, `v{버전}-win`
+- 버전 업데이트 시 양쪽 파일의 `APP_VERSION`을 동일하게 올릴 것

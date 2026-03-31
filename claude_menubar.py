@@ -27,8 +27,9 @@ import rumps
 
 APP_VERSION = "1.0.8"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
-GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+PLATFORM_TAG_SUFFIX = "-mac"  # only check releases tagged like v1.0.9-mac
 UPDATE_CHECK_INTERVAL = 3600  # check every 1 hour
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -131,8 +132,13 @@ _update_cache = {
 
 
 def _parse_version(tag):
-    """Parse version string like 'v1.0.5' or '1.0.5' into tuple of ints."""
+    """Parse version string like 'v1.0.5-mac' or '1.0.5' into tuple of ints."""
     tag = tag.lstrip("v")
+    # Strip platform suffix (e.g. '-mac', '-win')
+    for suffix in ("-mac", "-win"):
+        if tag.endswith(suffix):
+            tag = tag[:-len(suffix)]
+            break
     try:
         return tuple(int(x) for x in tag.split("."))
     except (ValueError, AttributeError):
@@ -140,7 +146,10 @@ def _parse_version(tag):
 
 
 def _check_update():
-    """Check GitHub releases for a newer version. Returns (new_version, url) or (None, None)."""
+    """Check GitHub releases for a newer version matching this platform.
+    Only considers releases tagged with PLATFORM_TAG_SUFFIX (e.g. v1.0.9-mac).
+    Returns (new_version, url) or (None, None).
+    """
     now = time.time()
     if now - _update_cache["checked_at"] < UPDATE_CHECK_INTERVAL:
         v = _update_cache["latest_version"]
@@ -155,14 +164,19 @@ def _check_update():
             "User-Agent": f"claude-usage-menubar/{APP_VERSION}",
         })
         with urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-        tag = data.get("tag_name", "")
-        url = data.get("html_url", GITHUB_RELEASES_PAGE)
-        _update_cache["latest_version"] = tag
-        _update_cache["release_url"] = url
-        if _parse_version(tag) > _parse_version(APP_VERSION):
-            print(f"[UPDATE] New version available: {tag}", flush=True)
-            return tag, url
+            releases = json.loads(resp.read())
+
+        # Find the latest release matching our platform suffix
+        for release in releases:
+            tag = release.get("tag_name", "")
+            if tag.endswith(PLATFORM_TAG_SUFFIX):
+                url = release.get("html_url", GITHUB_RELEASES_PAGE)
+                _update_cache["latest_version"] = tag
+                _update_cache["release_url"] = url
+                if _parse_version(tag) > _parse_version(APP_VERSION):
+                    print(f"[UPDATE] New version available: {tag}", flush=True)
+                    return tag, url
+                break  # first match is latest (API returns newest first)
     except Exception as e:
         print(f"[UPDATE] Check failed: {e}", flush=True)
     return None, None

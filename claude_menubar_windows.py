@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -657,6 +657,83 @@ class UsageTracker:
         return result
 
 
+# ─── Plan recommendation ────────────────────────────────────────────────────
+
+CLAUDE_PLANS = [
+    ("Pro",     20,   5.0,   50.0,   "기본 사용량"),
+    ("Max 5x",  100,  250.0, 2500.0, "5배 사용량"),
+    ("Max 20x", 200,  1000.0, 10000.0, "20배 사용량"),
+]
+
+
+def _recommend_plan(tracker, api_cache):
+    """Analyze usage and recommend the best subscription plan."""
+    daily = tracker.daily_costs(30)
+    daily_costs_list = [c for _, c in daily]
+    active_days = sum(1 for c in daily_costs_list if c > 0.001)
+    total_30d = sum(daily_costs_list)
+    projected_monthly = total_30d
+
+    tier = (api_cache.get("rate_limit_tier") or "").lower()
+    current_plan = "Unknown"
+    for keyword, label in [("max_20x", "Max 20x"), ("max_5x", "Max 5x"), ("max", "Max 5x"), ("pro", "Pro")]:
+        if keyword in tier:
+            current_plan = label
+            break
+
+    week_totals, week_models, week_costs = tracker.week_usage()
+    week_cost = week_totals.get("cost", 0)
+    opus_cost = sum(v for k, v in week_costs.items() if "opus" in k.lower())
+    opus_ratio = opus_cost / week_cost if week_cost > 0 else 0
+
+    peak_week_cost = 0
+    for i in range(max(len(daily_costs_list) - 6, 0)):
+        week_sum = sum(daily_costs_list[i:i+7])
+        peak_week_cost = max(peak_week_cost, week_sum)
+
+    recommended = None
+    for plan_name, price, sess_lim, week_lim, _desc in CLAUDE_PLANS:
+        if peak_week_cost <= week_lim * 0.8:
+            recommended = (plan_name, price)
+            break
+    if recommended is None:
+        recommended = ("Max 20x", 200)
+
+    rec_name, rec_price = recommended
+
+    reasons = []
+    if rec_name == "Pro":
+        reasons.append(f"Peak weekly ${peak_week_cost:.0f} within Pro limit")
+    elif rec_name == "Max 5x":
+        reasons.append(f"Peak weekly ${peak_week_cost:.0f} within Max 5x limit")
+    else:
+        reasons.append(f"Peak weekly ${peak_week_cost:.0f} needs Max 20x")
+    if opus_ratio > 0.5:
+        reasons.append(f"High Opus usage ({opus_ratio:.0%})")
+
+    savings = None
+    if current_plan != "Unknown" and current_plan != rec_name:
+        current_price = next((p for n, p, _, _, _ in CLAUDE_PLANS if n == current_plan), None)
+        if current_price and rec_price < current_price:
+            savings = current_price - rec_price
+
+    plan_fits = []
+    for plan_name, price, sess_lim, week_lim, _desc in CLAUDE_PLANS:
+        usage_pct = (peak_week_cost / week_lim * 100) if week_lim else 0
+        plan_fits.append({
+            "name": plan_name, "price": price, "week_limit": week_lim,
+            "usage_pct": usage_pct, "fits": peak_week_cost <= week_lim * 0.8,
+        })
+
+    return {
+        "current_plan": current_plan, "recommended": rec_name, "rec_price": rec_price,
+        "projected_monthly": projected_monthly, "total_30d": total_30d,
+        "active_days": active_days, "peak_week_cost": peak_week_cost,
+        "opus_ratio": opus_ratio, "reasons": reasons, "savings": savings,
+        "plan_fits": plan_fits,
+    }
+
+
 # ─── Reset-time helpers ──────────────────────────────────────────────────────
 
 def _fmt_reset(dt):
@@ -982,6 +1059,51 @@ class ClaudeUsageTray:
                 f"{date_str}  {bar}  {fmt_cost(cost)}",
                 None, enabled=False))
         items.append(pystray.MenuItem(f"7d {spark} {fmt_cost(total_7d)}", pystray.Menu(*history_items)))
+
+        # Plan recommendation submenu
+        try:
+            rec = _recommend_plan(self.tracker, _api_cache)
+            plan_items = []
+            plan_items.append(pystray.MenuItem(f"Current: {rec['current_plan']}", None, enabled=False))
+            plan_items.append(pystray.Menu.SEPARATOR)
+            plan_items.append(pystray.MenuItem(
+                f"30d cost: {fmt_cost(rec['total_30d'])} ({rec['active_days']} active days)",
+                None, enabled=False))
+            plan_items.append(pystray.MenuItem(
+                f"Peak weekly: {fmt_cost(rec['peak_week_cost'])}", None, enabled=False))
+            if rec['opus_ratio'] > 0.01:
+                plan_items.append(pystray.MenuItem(
+                    f"Opus ratio: {rec['opus_ratio']:.0%}", None, enabled=False))
+            plan_items.append(pystray.Menu.SEPARATOR)
+            for pf in rec['plan_fits']:
+                usage_pct = pf['usage_pct']
+                if usage_pct > 100:
+                    status = "\U0001f534"  # red circle
+                elif usage_pct > 80:
+                    status = "\U0001f7e1"  # yellow circle
+                else:
+                    status = "\U0001f7e2"  # green circle
+                is_rec = " *" if pf['name'] == rec['recommended'] else ""
+                is_cur = " (current)" if pf['name'] == rec['current_plan'] else ""
+                plan_items.append(pystray.MenuItem(
+                    f"{status} {pf['name']} ${pf['price']}/mo — {usage_pct:.0f}% of limit{is_rec}{is_cur}",
+                    None, enabled=False))
+            plan_items.append(pystray.Menu.SEPARATOR)
+            star = "* " if rec['recommended'] != rec['current_plan'] else ""
+            plan_items.append(pystray.MenuItem(
+                f"{star}Recommended: {rec['recommended']} (${rec['rec_price']}/mo)",
+                None, enabled=False))
+            for r in rec['reasons']:
+                plan_items.append(pystray.MenuItem(f"  → {r}", None, enabled=False))
+            if rec['savings']:
+                plan_items.append(pystray.MenuItem(
+                    f"Save ${rec['savings']}/mo", None, enabled=False))
+            elif rec['recommended'] == rec['current_plan']:
+                plan_items.append(pystray.MenuItem(
+                    "Current plan is optimal", None, enabled=False))
+            items.append(pystray.MenuItem("Plan Recommendation", pystray.Menu(*plan_items)))
+        except Exception as e:
+            print(f"[PLAN] Recommendation error: {e}", flush=True)
 
         items.append(pystray.Menu.SEPARATOR)
 

@@ -25,7 +25,7 @@ import rumps
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -900,6 +900,111 @@ class UsageTracker:
         return result
 
 
+# ─── Plan recommendation ────────────────────────────────────────────────────
+
+# Claude subscription plans: (name, monthly_price_usd, session_limit, week_limit, description)
+CLAUDE_PLANS = [
+    ("Pro",     20,   5.0,   50.0,   "기본 사용량"),
+    ("Max 5x",  100,  250.0, 2500.0, "5배 사용량"),
+    ("Max 20x", 200,  1000.0, 10000.0, "20배 사용량"),
+]
+
+
+def _recommend_plan(tracker, api_cache):
+    """Analyze usage and recommend the best subscription plan.
+    Returns dict with recommendation details.
+    """
+    # Gather 30-day cost data
+    daily = tracker.daily_costs(30)
+    daily_costs_list = [c for _, c in daily]
+    active_days = sum(1 for c in daily_costs_list if c > 0.001)
+    total_30d = sum(daily_costs_list)
+
+    # Monthly projection: use actual 30-day total as-is
+    # (extrapolating active-day averages over-estimates for irregular usage)
+    projected_monthly = total_30d
+
+    # Current plan detection
+    tier = (api_cache.get("rate_limit_tier") or "").lower()
+    current_plan = "알 수 없음"
+    for keyword, label in [("max_20x", "Max 20x"), ("max_5x", "Max 5x"), ("max", "Max 5x"), ("pro", "Pro")]:
+        if keyword in tier:
+            current_plan = label
+            break
+
+    # 7-day usage data for utilization analysis
+    week_totals, week_models, week_costs = tracker.week_usage()
+    week_cost = week_totals.get("cost", 0)
+
+    # Opus ratio (higher Opus usage = needs higher tier)
+    opus_cost = sum(v for k, v in week_costs.items() if "opus" in k.lower())
+    opus_ratio = opus_cost / week_cost if week_cost > 0 else 0
+
+    # Find the cheapest plan whose weekly limit covers peak usage
+    # Calculate peak 7-day rolling cost from daily data
+    peak_week_cost = 0
+    for i in range(max(len(daily_costs_list) - 6, 0)):
+        week_sum = sum(daily_costs_list[i:i+7])
+        peak_week_cost = max(peak_week_cost, week_sum)
+
+    recommended = None
+    for plan_name, price, sess_lim, week_lim, _desc in CLAUDE_PLANS:
+        # Plan is suitable if its weekly limit covers peak usage with 20% headroom
+        if peak_week_cost <= week_lim * 0.8:
+            recommended = (plan_name, price)
+            break
+
+    if recommended is None:
+        recommended = ("Max 20x", 200)
+
+    rec_name, rec_price = recommended
+
+    # Build reason
+    reasons = []
+    if rec_name == "Pro":
+        reasons.append(f"피크 주간 ${peak_week_cost:.0f} → Pro 한도 내")
+    elif rec_name == "Max 5x":
+        reasons.append(f"피크 주간 ${peak_week_cost:.0f} → Max 5x 한도 내")
+    else:
+        reasons.append(f"피크 주간 ${peak_week_cost:.0f} → Max 20x 필요")
+
+    if opus_ratio > 0.5:
+        reasons.append(f"Opus 비중 높음 ({opus_ratio:.0%})")
+
+    # Savings calculation
+    savings = None
+    if current_plan != "알 수 없음" and current_plan != rec_name:
+        current_price = next((p for n, p, _, _, _ in CLAUDE_PLANS if n == current_plan), None)
+        if current_price and rec_price < current_price:
+            savings = current_price - rec_price
+
+    # Per-plan fit info
+    plan_fits = []
+    for plan_name, price, sess_lim, week_lim, _desc in CLAUDE_PLANS:
+        usage_pct = (peak_week_cost / week_lim * 100) if week_lim else 0
+        plan_fits.append({
+            "name": plan_name,
+            "price": price,
+            "week_limit": week_lim,
+            "usage_pct": usage_pct,
+            "fits": peak_week_cost <= week_lim * 0.8,
+        })
+
+    return {
+        "current_plan": current_plan,
+        "recommended": rec_name,
+        "rec_price": rec_price,
+        "projected_monthly": projected_monthly,
+        "total_30d": total_30d,
+        "active_days": active_days,
+        "peak_week_cost": peak_week_cost,
+        "opus_ratio": opus_ratio,
+        "reasons": reasons,
+        "savings": savings,
+        "plan_fits": plan_fits,
+    }
+
+
 # ─── Reset-time helpers ──────────────────────────────────────────────────────
 
 def _next_session_reset():
@@ -1210,6 +1315,55 @@ class ClaudeUsageApp(rumps.App):
                 callback=None,
             ))
         self.menu.add(history_menu)
+
+        # ── Plan recommendation (submenu) ──
+        try:
+            rec = _recommend_plan(self.tracker, _api_cache)
+            rec_menu = rumps.MenuItem("💡 플랜 추천")
+
+            rec_menu.add(rumps.MenuItem(f"  현재 플랜: {rec['current_plan']}", callback=None))
+            rec_menu.add(rumps.separator)
+
+            rec_menu.add(rumps.MenuItem("── 사용량 분석 ──", callback=None))
+            rec_menu.add(rumps.MenuItem(f"  30일 비용: {fmt_cost(rec['total_30d'])} ({rec['active_days']}일 활성)", callback=None))
+            rec_menu.add(rumps.MenuItem(f"  피크 주간: {fmt_cost(rec['peak_week_cost'])}", callback=None))
+            if rec['opus_ratio'] > 0.01:
+                rec_menu.add(rumps.MenuItem(f"  Opus 비중: {rec['opus_ratio']:.0%}", callback=None))
+            rec_menu.add(rumps.separator)
+
+            rec_menu.add(rumps.MenuItem("── 플랜별 비교 ──", callback=None))
+            for pf in rec['plan_fits']:
+                usage_pct = pf['usage_pct']
+                if usage_pct > 100:
+                    status = "🔴 초과"
+                elif usage_pct > 80:
+                    status = "🟡 빠듯"
+                else:
+                    status = "🟢 여유"
+                is_rec = " ⭐" if pf['name'] == rec['recommended'] else ""
+                is_cur = " (현재)" if pf['name'] == rec['current_plan'] else ""
+                rec_menu.add(rumps.MenuItem(
+                    f"  {status}  {pf['name']} ${pf['price']}/월  — 한도의 {usage_pct:.0f}% 사용{is_rec}{is_cur}",
+                    callback=None,
+                ))
+            rec_menu.add(rumps.separator)
+
+            star = "⭐ " if rec['recommended'] != rec['current_plan'] else "✓ "
+            rec_menu.add(rumps.MenuItem(
+                f"  {star}추천: {rec['recommended']} (${rec['rec_price']}/월)",
+                callback=None,
+            ))
+            for r in rec['reasons']:
+                rec_menu.add(rumps.MenuItem(f"    → {r}", callback=None))
+
+            if rec['savings']:
+                rec_menu.add(rumps.MenuItem(f"  💰 월 ${rec['savings']} 절약 가능", callback=None))
+            elif rec['recommended'] == rec['current_plan']:
+                rec_menu.add(rumps.MenuItem("  ✅ 현재 플랜이 적합합니다", callback=None))
+
+            self.menu.add(rec_menu)
+        except Exception as e:
+            print(f"[PLAN] Recommendation error: {e}", flush=True)
 
     # ── threshold alerts ─────────────────────────────────────────────────
 

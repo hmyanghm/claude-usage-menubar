@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -135,7 +135,7 @@ def _get_oauth_data():
         oauth = file_data.get("claudeAiOauth")
         if oauth and oauth.get("accessToken"):
             print("[OAuth] Loaded from .credentials.json", flush=True)
-            return oauth
+            return file_data
     except (FileNotFoundError, json.JSONDecodeError, PermissionError, KeyError) as e:
         print(f"[OAuth] .credentials.json read failed: {e}", flush=True)
 
@@ -410,12 +410,28 @@ def _parse_reset_time(iso_str):
 
 # ─── Progress Bar ────────────────────────────────────────────────────────────
 
+def _noop(*args, **kwargs):
+    """No-op callback for read-only menu items (keeps text non-greyed)."""
+    pass
+
+
+def _pct_emoji(pct):
+    """Return a colored circle emoji based on usage percentage."""
+    if pct >= 90:
+        return "\U0001f534"   # 🔴
+    if pct >= 70:
+        return "\U0001f7e0"   # 🟠
+    if pct >= 50:
+        return "\U0001f7e1"   # 🟡
+    return "\U0001f7e2"       # 🟢
+
+
 def make_bar(pct, width=20):
     pct = max(0, min(100, pct))
     filled = round(width * pct / 100)
     empty = width - filled
     bar = "\u2588" * filled + "\u2591" * empty
-    return f"{bar}  {pct:.0f}%"
+    return f"{_pct_emoji(pct)} {bar}  {pct:.0f}%"
 
 
 def fmt_tokens(n):
@@ -988,7 +1004,7 @@ class ClaudeUsageTray:
                 data = self._get_usage_data()
             except Exception as e:
                 return pystray.Menu(
-                    pystray.MenuItem(f"Error: {e}", None, enabled=False),
+                    pystray.MenuItem(f"Error: {e}", _noop),
                     pystray.Menu.SEPARATOR,
                     pystray.MenuItem("Refresh", self._on_refresh),
                     pystray.MenuItem("Quit", self._on_quit),
@@ -1002,19 +1018,19 @@ class ClaudeUsageTray:
         acct_email = _api_cache.get("account_email")
         acct_name = _api_cache.get("account_name")
         if acct_email:
-            label = f"{acct_name} ({acct_email})" if acct_name else acct_email
-            items.append(pystray.MenuItem(label, None, enabled=False))
+            label = f"\U0001f464 {acct_name} ({acct_email})" if acct_name else f"\U0001f464 {acct_email}"
+            items.append(pystray.MenuItem(label, _noop))
             items.append(pystray.Menu.SEPARATOR)
 
         # API status
         api_ok = data["api_ok"]
         api_stale = data["api_stale"]
         if not data["api"]:
-            items.append(pystray.MenuItem("Usage API unavailable", None, enabled=False))
+            items.append(pystray.MenuItem("\u26a0\ufe0f Usage API unavailable", _noop))
             items.append(pystray.Menu.SEPARATOR)
         elif api_stale:
             ago = int(time.time() - _api_cache["fetched_at"])
-            items.append(pystray.MenuItem(f"Cached data ({ago}s ago)", None, enabled=False))
+            items.append(pystray.MenuItem(f"\U0001f4e6 Cached data ({ago}s ago)", _noop))
             items.append(pystray.Menu.SEPARATOR)
 
         est = "" if api_ok else " (est.)"
@@ -1022,24 +1038,24 @@ class ClaudeUsageTray:
         # Session
         if config.get("show_session", True):
             sess_pct = data["sess_pct"]
-            items.append(pystray.MenuItem(f"Session{est}: {make_bar(sess_pct)}", None, enabled=False))
+            items.append(pystray.MenuItem(f"\u23f1\ufe0f Session{est}: {make_bar(sess_pct)}", _noop))
             if data["sess_reset"]:
-                items.append(pystray.MenuItem(f"  Resets {_fmt_reset(data['sess_reset'])}", None, enabled=False))
+                items.append(pystray.MenuItem(f"  \u23f3 Resets {_fmt_reset(data['sess_reset'])}", _noop))
             items.append(pystray.Menu.SEPARATOR)
 
         # Week (all models)
         if config.get("show_week", True):
             week_pct = data["week_pct"]
-            items.append(pystray.MenuItem(f"Week (all){est}: {make_bar(week_pct)}", None, enabled=False))
+            items.append(pystray.MenuItem(f"\U0001f4c5 Week (all){est}: {make_bar(week_pct)}", _noop))
             if data["week_reset"]:
-                items.append(pystray.MenuItem(f"  Resets {_fmt_reset(data['week_reset'])}", None, enabled=False))
+                items.append(pystray.MenuItem(f"  \u23f3 Resets {_fmt_reset(data['week_reset'])}", _noop))
             items.append(pystray.Menu.SEPARATOR)
 
         # Week (Sonnet only)
         if config.get("show_sonnet", True) and data["sonnet_pct"] is not None:
-            items.append(pystray.MenuItem(f"Week (Sonnet): {make_bar(data['sonnet_pct'])}", None, enabled=False))
+            items.append(pystray.MenuItem(f"\U0001f4a0 Week (Sonnet): {make_bar(data['sonnet_pct'])}", _noop))
             if data["sonnet_reset"]:
-                items.append(pystray.MenuItem(f"  Resets {_fmt_reset(data['sonnet_reset'])}", None, enabled=False))
+                items.append(pystray.MenuItem(f"  \u23f3 Resets {_fmt_reset(data['sonnet_reset'])}", _noop))
             items.append(pystray.Menu.SEPARATOR)
 
         # Detail submenu
@@ -1050,30 +1066,30 @@ class ClaudeUsageTray:
         week_tokens = week_totals.get("total", 0)
 
         detail_items = [
-            pystray.MenuItem("-- Today --", None, enabled=False),
+            pystray.MenuItem("\U0001f4c6 Today", _noop),
             pystray.MenuItem(
-                f"  Tokens {fmt_tokens(today_totals.get('total', 0))}  "
+                f"  \U0001f4ac Tokens {fmt_tokens(today_totals.get('total', 0))}  "
                 f"(in {fmt_tokens(today_totals.get('input', 0))} / out {fmt_tokens(today_totals.get('output', 0))})",
-                None, enabled=False),
-            pystray.MenuItem(f"  Cost {fmt_cost(today_totals.get('cost', 0))}", None, enabled=False),
-            pystray.MenuItem(f"  Requests {today_totals.get('requests', 0)}", None, enabled=False),
+                _noop),
+            pystray.MenuItem(f"  \U0001f4b0 Cost {fmt_cost(today_totals.get('cost', 0))}", _noop),
+            pystray.MenuItem(f"  \U0001f4e8 Requests {today_totals.get('requests', 0)}", _noop),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("-- Session (5h) --", None, enabled=False),
+            pystray.MenuItem("\u23f1\ufe0f Session (5h)", _noop),
             pystray.MenuItem(
-                f"  Tokens {fmt_tokens(sess_tokens)}  "
+                f"  \U0001f4ac Tokens {fmt_tokens(sess_tokens)}  "
                 f"(in {fmt_tokens(sess_totals.get('input', 0))} / out {fmt_tokens(sess_totals.get('output', 0))})",
-                None, enabled=False),
-            pystray.MenuItem(f"  Cost {fmt_cost(sess_totals.get('cost', 0))}", None, enabled=False),
+                _noop),
+            pystray.MenuItem(f"  \U0001f4b0 Cost {fmt_cost(sess_totals.get('cost', 0))}", _noop),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("-- This Week (7d) --", None, enabled=False),
+            pystray.MenuItem("\U0001f4c5 This Week (7d)", _noop),
             pystray.MenuItem(
-                f"  Tokens {fmt_tokens(week_tokens)}  "
+                f"  \U0001f4ac Tokens {fmt_tokens(week_tokens)}  "
                 f"(in {fmt_tokens(week_totals.get('input', 0))} / out {fmt_tokens(week_totals.get('output', 0))})",
-                None, enabled=False),
-            pystray.MenuItem(f"  Cost {fmt_cost(week_totals.get('cost', 0))}", None, enabled=False),
-            pystray.MenuItem(f"  Requests {week_totals.get('requests', 0)}", None, enabled=False),
+                _noop),
+            pystray.MenuItem(f"  \U0001f4b0 Cost {fmt_cost(week_totals.get('cost', 0))}", _noop),
+            pystray.MenuItem(f"  \U0001f4e8 Requests {week_totals.get('requests', 0)}", _noop),
         ]
-        items.append(pystray.MenuItem("Detail", pystray.Menu(*detail_items)))
+        items.append(pystray.MenuItem("\U0001f4ca Detail", pystray.Menu(*detail_items)))
 
         # Model breakdown submenu
         week_models = data["week_models"]
@@ -1086,8 +1102,8 @@ class ClaudeUsageTray:
                 short = m.split("/")[-1] if "/" in m else m
                 model_items.append(pystray.MenuItem(
                     f"{short}: {fmt_tokens(total_t)}  {fmt_cost(week_costs[m])}",
-                    None, enabled=False))
-            items.append(pystray.MenuItem("Models", pystray.Menu(*model_items)))
+                    _noop))
+            items.append(pystray.MenuItem("\U0001f916 Models", pystray.Menu(*model_items)))
 
         # 7-day history submenu
         daily = self.tracker.daily_costs(7)
@@ -1102,23 +1118,23 @@ class ClaudeUsageTray:
             bar = "\u2588" * bar_len + "\u2591" * (10 - bar_len)
             history_items.append(pystray.MenuItem(
                 f"{date_str}  {bar}  {fmt_cost(cost)}",
-                None, enabled=False))
-        items.append(pystray.MenuItem(f"7d {spark} {fmt_cost(total_7d)}", pystray.Menu(*history_items)))
+                _noop))
+        items.append(pystray.MenuItem(f"\U0001f4c8 7d {spark} {fmt_cost(total_7d)}", pystray.Menu(*history_items)))
 
         # Plan recommendation submenu
         try:
             rec = _recommend_plan(self.tracker, _api_cache)
             plan_items = []
-            plan_items.append(pystray.MenuItem(f"Current: {rec['current_plan']}", None, enabled=False))
+            plan_items.append(pystray.MenuItem(f"\U0001f4cc Current: {rec['current_plan']}", _noop))
             plan_items.append(pystray.Menu.SEPARATOR)
             plan_items.append(pystray.MenuItem(
-                f"30d cost: {fmt_cost(rec['total_30d'])} ({rec['active_days']} active days)",
-                None, enabled=False))
+                f"\U0001f4b0 30d cost: {fmt_cost(rec['total_30d'])} ({rec['active_days']} active days)",
+                _noop))
             plan_items.append(pystray.MenuItem(
-                f"Peak weekly: {fmt_cost(rec['peak_week_cost'])}", None, enabled=False))
+                f"\U0001f4c8 Peak weekly: {fmt_cost(rec['peak_week_cost'])}", _noop))
             if rec['opus_ratio'] > 0.01:
                 plan_items.append(pystray.MenuItem(
-                    f"Opus ratio: {rec['opus_ratio']:.0%}", None, enabled=False))
+                    f"Opus ratio: {rec['opus_ratio']:.0%}", _noop))
             plan_items.append(pystray.Menu.SEPARATOR)
             for pf in rec['plan_fits']:
                 usage_pct = pf['usage_pct']
@@ -1132,21 +1148,21 @@ class ClaudeUsageTray:
                 is_cur = " (current)" if pf['name'] == rec['current_plan'] else ""
                 plan_items.append(pystray.MenuItem(
                     f"{status} {pf['name']} ${pf['price']}/mo — {usage_pct:.0f}% of limit{is_rec}{is_cur}",
-                    None, enabled=False))
+                    _noop))
             plan_items.append(pystray.Menu.SEPARATOR)
-            star = "* " if rec['recommended'] != rec['current_plan'] else ""
+            star = "\u2b50 " if rec['recommended'] != rec['current_plan'] else "\u2705 "
             plan_items.append(pystray.MenuItem(
                 f"{star}Recommended: {rec['recommended']} (${rec['rec_price']}/mo)",
-                None, enabled=False))
+                _noop))
             for r in rec['reasons']:
-                plan_items.append(pystray.MenuItem(f"  → {r}", None, enabled=False))
+                plan_items.append(pystray.MenuItem(f"  \u2192 {r}", _noop))
             if rec['savings']:
                 plan_items.append(pystray.MenuItem(
-                    f"Save ${rec['savings']}/mo", None, enabled=False))
+                    f"\U0001f4b5 Save ${rec['savings']}/mo", _noop))
             elif rec['recommended'] == rec['current_plan']:
                 plan_items.append(pystray.MenuItem(
-                    "Current plan is optimal", None, enabled=False))
-            items.append(pystray.MenuItem("Plan Recommendation", pystray.Menu(*plan_items)))
+                    "\u2705 Current plan is optimal", _noop))
+            items.append(pystray.MenuItem("\U0001f4cb Plan Recommendation", pystray.Menu(*plan_items)))
         except Exception as e:
             print(f"[PLAN] Recommendation error: {e}", flush=True)
 
@@ -1195,9 +1211,9 @@ class ClaudeUsageTray:
             items.append(pystray.MenuItem(f"Update: {new_ver}", _on_update_click))
 
         items.append(pystray.Menu.SEPARATOR)
-        items.append(pystray.MenuItem("Refresh", self._on_refresh))
-        items.append(pystray.MenuItem(f"v{APP_VERSION}", None, enabled=False))
-        items.append(pystray.MenuItem("Quit", self._on_quit))
+        items.append(pystray.MenuItem("\U0001f504 Refresh", self._on_refresh))
+        items.append(pystray.MenuItem(f"v{APP_VERSION}", _noop))
+        items.append(pystray.MenuItem("\u274c Quit", self._on_quit))
 
         return pystray.Menu(*items)
 

@@ -108,14 +108,14 @@ del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Claude Usage Monito
 
 ### 트러블슈팅
 
-OAuth 토큰을 Windows 자격 증명 관리자에서 읽습니다. Claude Code 로그인 후에도 토큰을 찾지 못하는 경우:
+OAuth 토큰을 `~/.claude/.credentials.json` 파일에서 우선 읽고, 없으면 Windows 자격 증명 관리자를 fallback으로 사용합니다. Claude Code 로그인 후에도 토큰을 찾지 못하는 경우:
 
-1. **자격 증명 확인**: 제어판 → 자격 증명 관리자 → Windows 자격 증명 → "Claude" 관련 항목 확인
-2. **PowerShell로 확인**: `cmdkey /list | findstr "Claude"`
-3. 항목 이름이 다르면 [이슈](https://github.com/hmyanghm/claude-usage-menubar/issues)에 해당 이름을 알려주세요.
+1. **인증 파일 확인**: `%USERPROFILE%\.claude\.credentials.json` 파일이 존재하는지 확인
+2. **자격 증명 관리자 확인**: 제어판 → 자격 증명 관리자 → Windows 자격 증명 → "Claude" 관련 항목 확인
+3. 두 곳 모두 토큰이 없으면 [이슈](https://github.com/hmyanghm/claude-usage-menubar/issues)에 알려주세요.
 
 ---
 
 ## 동작 원리
 
-OAuth 토큰(macOS: Keychain, Windows: 자격 증명 관리자)을 읽어 Anthropic Usage API를 호출합니다. 토큰/비용 상세는 `~/.claude/`의 로컬 JSONL 세션 파일에서 계산합니다. API 장애 시 로컬 추정치로 폴백합니다. OAuth 토큰이 만료되면 refresh token으로 자동 갱신합니다.
+OAuth 토큰(macOS: Keychain, Windows: `~/.claude/.credentials.json`)을 읽어 Anthropic Usage API를 호출합니다. 토큰/비용 상세는 `~/.claude/`의 로컬 JSONL 세션 파일에서 계산합니다. API 장애 시 로컬 추정치로 폴백합니다. OAuth 토큰이 만료되면 refresh token으로 자동 갱신합니다.

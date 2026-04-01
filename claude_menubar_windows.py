@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -126,21 +126,21 @@ OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 # ─── Windows Credential Manager ─────────────────────────────────────────────
 
 def _get_oauth_data():
-    """Retrieve OAuth data from Windows Credential Manager."""
+    """Retrieve OAuth data from credentials file or Windows Credential Manager."""
+    # 1) Try reading from ~/.claude/.credentials.json (Claude Code's default on Windows)
+    creds_file = CLAUDE_DIR / ".credentials.json"
     try:
-        # Use PowerShell to read from Windows Credential Manager
-        # cmdkey stores as generic credentials
-        ps_script = '''
-        $cred = Get-StoredCredential -Target "Claude Code-credentials" -ErrorAction SilentlyContinue
-        if ($cred) {
-            $cred.GetNetworkCredential().Password
-        } else {
-            # Fallback: try reading via cmdkey/vaultcmd approach
-            Add-Type -AssemblyName System.Runtime.InteropServices
-            $null
-        }
-        '''
-        # Try using ctypes directly for CredRead
+        with open(creds_file, "r", encoding="utf-8") as f:
+            file_data = json.load(f)
+        oauth = file_data.get("claudeAiOauth")
+        if oauth and oauth.get("accessToken"):
+            print("[OAuth] Loaded from .credentials.json", flush=True)
+            return oauth
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError, KeyError) as e:
+        print(f"[OAuth] .credentials.json read failed: {e}", flush=True)
+
+    # 2) Fallback: Windows Credential Manager
+    try:
         return _cred_read_win32("Claude Code-credentials")
     except Exception as e:
         print(f"[OAuth] Credential read error: {e}", flush=True)
@@ -172,7 +172,7 @@ def _cred_read_win32(target_name):
     pcred = ctypes.POINTER(CREDENTIAL)()
     ok = advapi32.CredReadW(target_name, CRED_TYPE_GENERIC, 0, ctypes.byref(pcred))
     if not ok:
-        print("[OAuth] CredReadW failed — no credential found", flush=True)
+        print("[OAuth] CredReadW failed - no credential found", flush=True)
         return None
 
     try:
@@ -195,44 +195,18 @@ def _cred_read_win32(target_name):
 
 
 def _save_oauth_data(data):
-    """Save updated OAuth data to Windows Credential Manager."""
+    """Save updated OAuth data to ~/.claude/.credentials.json."""
+    creds_file = CLAUDE_DIR / ".credentials.json"
     try:
-        advapi32 = ctypes.windll.advapi32
-        CRED_TYPE_GENERIC = 1
-        CRED_PERSIST_LOCAL_MACHINE = 2
-
-        payload = json.dumps(data)
-        blob = payload.encode("utf-16-le")
-
-        class CREDENTIAL(ctypes.Structure):
-            _fields_ = [
-                ("Flags", ctypes.wintypes.DWORD),
-                ("Type", ctypes.wintypes.DWORD),
-                ("TargetName", ctypes.wintypes.LPWSTR),
-                ("Comment", ctypes.wintypes.LPWSTR),
-                ("LastWritten", ctypes.wintypes.FILETIME),
-                ("CredentialBlobSize", ctypes.wintypes.DWORD),
-                ("CredentialBlob", ctypes.c_void_p),
-                ("Persist", ctypes.wintypes.DWORD),
-                ("AttributeCount", ctypes.wintypes.DWORD),
-                ("Attributes", ctypes.c_void_p),
-                ("TargetAlias", ctypes.wintypes.LPWSTR),
-                ("UserName", ctypes.wintypes.LPWSTR),
-            ]
-
-        cred = CREDENTIAL()
-        cred.Type = CRED_TYPE_GENERIC
-        cred.TargetName = "Claude Code-credentials"
-        cred.CredentialBlobSize = len(blob)
-        cred.CredentialBlob = ctypes.cast(ctypes.create_string_buffer(blob, len(blob)), ctypes.c_void_p)
-        cred.Persist = CRED_PERSIST_LOCAL_MACHINE
-        cred.UserName = os.environ.get("USERNAME", "claude-code-user")
-
-        ok = advapi32.CredWriteW(ctypes.byref(cred), 0)
-        if ok:
-            print("[OAuth] Credential Manager updated", flush=True)
-        else:
-            print(f"[OAuth] CredWriteW failed: {ctypes.GetLastError()}", flush=True)
+        # Read existing file to preserve other keys
+        existing = {}
+        if creds_file.exists():
+            with open(creds_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        existing["claudeAiOauth"] = data
+        with open(creds_file, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+        print("[OAuth] .credentials.json updated", flush=True)
     except Exception as e:
         print(f"[OAuth] Credential save error: {e}", flush=True)
 

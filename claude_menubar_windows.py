@@ -899,17 +899,26 @@ def _send_notification(title, message):
 def _create_icon_image(text="--", color="#4A90D9"):
     """Create a small tray icon with percentage text."""
     size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    img = Image.new("RGB", (size, size), (0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Background circle
+    # Background circle (fill entire square first, then draw circle)
+    draw.rectangle([0, 0, size, size], fill=(0, 0, 0))
     draw.ellipse([2, 2, size - 2, size - 2], fill=color)
 
-    # Text
-    try:
-        font = ImageFont.truetype("arial.ttf", 24)
-    except OSError:
-        font = ImageFont.load_default()
+    # Text — try multiple common Windows fonts
+    font = None
+    for font_name in ["arial.ttf", "segoeui.ttf", "tahoma.ttf", "calibri.ttf"]:
+        try:
+            font = ImageFont.truetype(font_name, 24)
+            break
+        except OSError:
+            continue
+    if font is None:
+        try:
+            font = ImageFont.truetype("C:\\Windows\\Fonts\\arial.ttf", 24)
+        except OSError:
+            font = ImageFont.load_default(size=20)
 
     bbox = draw.textbbox((0, 0), text, font=font)
     tw = bbox[2] - bbox[0]

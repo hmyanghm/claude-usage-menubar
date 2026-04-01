@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -774,6 +774,77 @@ def _check_update():
     return None, None
 
 
+def _get_running_script_path():
+    """Detect the actual path of the currently running claude_menubar_windows.py."""
+    current = Path(__file__).resolve()
+    if current.name == "claude_menubar_windows.py":
+        return current
+    fallback = Path.home() / ".claude-menubar" / "claude_menubar_windows.py"
+    if fallback.exists():
+        return fallback
+    return None
+
+
+def _is_git_repo(script_path):
+    """Check if the script lives inside a git repository."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=script_path.parent, capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _auto_update(new_ver):
+    """Auto-update the app via git pull if running from a cloned repo."""
+    script_path = _get_running_script_path()
+    if not script_path or not _is_git_repo(script_path):
+        return False
+
+    try:
+        repo_dir = script_path.parent
+        print(f"[UPDATE] Git pull in {repo_dir}...", flush=True)
+        result = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            print(f"[UPDATE] git pull failed: {result.stderr}", flush=True)
+            return False
+
+        print(f"[UPDATE] Git updated to {new_ver}, restarting...", flush=True)
+        _send_notification("Update Complete", f"{new_ver} updated via git pull, restarting...")
+        _restart_app()
+        return True
+    except Exception as e:
+        print(f"[UPDATE] Git update failed: {e}", flush=True)
+        return False
+
+
+def _restart_app():
+    """Quit current process and relaunch after a short delay."""
+    install_dir = Path.home() / ".claude-menubar"
+    launch_bat = install_dir / "launch.bat"
+
+    if launch_bat.exists():
+        relaunch_cmd = str(launch_bat)
+    else:
+        script_path = _get_running_script_path()
+        if script_path:
+            relaunch_cmd = f'pythonw "{script_path}"'
+        else:
+            sys.exit(0)
+
+    # Use cmd to wait 2 seconds then relaunch, so current process exits first
+    subprocess.Popen(
+        f'cmd /c "timeout /t 2 /nobreak >nul & {relaunch_cmd}"',
+        shell=True, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    sys.exit(0)
+
+
 # ─── Windows Notifications ───────────────────────────────────────────────────
 
 def _send_notification(title, message):
@@ -1118,7 +1189,10 @@ class ClaudeUsageTray:
         # Update check
         new_ver, release_url = _check_update()
         if new_ver:
-            items.append(pystray.MenuItem(f"Update: {new_ver}", lambda: webbrowser.open(release_url)))
+            def _on_update_click(ver=new_ver, url=release_url):
+                if not _auto_update(ver):
+                    webbrowser.open(url)
+            items.append(pystray.MenuItem(f"Update: {new_ver}", _on_update_click))
 
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Refresh", self._on_refresh))
@@ -1211,6 +1285,16 @@ class ClaudeUsageTray:
                 self._update_icon(data)
             except Exception as e:
                 print(f"[AUTO-REFRESH] Error: {e}", flush=True)
+
+            # Check for updates and auto-update if possible
+            try:
+                new_ver, release_url = _check_update()
+                if new_ver:
+                    if not _auto_update(new_ver):
+                        _send_notification("Update Available",
+                                           f"New version {new_ver} is available.\nCheck the tray menu to download.")
+            except Exception as e:
+                print(f"[AUTO-REFRESH] Update check error: {e}", flush=True)
 
     def run(self):
         print(f"[DEBUG] Python: {sys.version}", flush=True)

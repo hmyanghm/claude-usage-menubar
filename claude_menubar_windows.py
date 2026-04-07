@@ -904,49 +904,46 @@ def _send_notification(title, message):
 class FloatingWidget:
     """Always-on-top slim bar showing usage at a glance, like a macOS menubar."""
 
-    BG = "#1E1E2E"
-    FG = "#CDD6F4"
-    GREEN = "#A6E3A1"
-    YELLOW = "#F9E2AF"
-    ORANGE = "#FAB387"
-    RED = "#F38BA8"
-    DIM = "#6C7086"
+    BG = "#1A1B26"
+    BG_INNER = "#24283B"
+    BORDER = "#414868"
+    FG = "#C0CAF5"
+    GREEN = "#9ECE6A"
+    YELLOW = "#E0AF68"
+    ORANGE = "#FF9E64"
+    RED = "#F7768E"
+    ACCENT = "#7AA2F7"
+    DIM = "#565F89"
+    SEP = "#414868"
+
+    BAR_W = 50
+    BAR_H = 6
 
     def __init__(self):
         self._root = tk.Tk()
-        self._root.withdraw()  # hide until first update
-        self._root.overrideredirect(True)  # no title bar
+        self._root.withdraw()
+        self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
-        self._root.attributes("-alpha", 0.92)
+        self._root.attributes("-alpha", 0.94)
+        # Transparent background for rounded corners
         self._root.configure(bg=self.BG)
 
-        # Single-row horizontal bar
-        self._frame = tk.Frame(self._root, bg=self.BG, padx=6, pady=2)
-        self._frame.pack()
+        # Canvas for rounded rectangle background
+        self._canvas = tk.Canvas(self._root, highlightthickness=0, bg=self.BG, bd=0)
+        self._canvas.pack(fill="both", expand=True)
 
-        # App icon label
-        icon_lbl = tk.Label(self._frame, text="\u2601", font=("Segoe UI", 10),
-                            fg="#89B4FA", bg=self.BG)
-        icon_lbl.pack(side="left", padx=(0, 4))
-
-        # Inline labels packed horizontally
-        self._labels = {}
-        for key in ("session", "week", "sonnet"):
-            lbl = tk.Label(self._frame, text="", font=("Segoe UI", 9),
-                           fg=self.FG, bg=self.BG)
-            lbl.pack(side="left", padx=(0, 2))
-            self._labels[key] = lbl
+        # We'll draw everything on the canvas after first update
+        self._items = {}
+        self._bar_items = {}
+        self._sep_items = {}
+        self._built = False
 
         # Drag support
         self._drag_data = {"x": 0, "y": 0}
-        for widget in [self._root, self._frame, icon_lbl]:
-            widget.bind("<ButtonPress-1>", self._on_drag_start)
-            widget.bind("<B1-Motion>", self._on_drag_move)
-            widget.bind("<ButtonRelease-1>", self._on_drag_end)
-
-        # Right-click to hide
-        self._root.bind("<Button-3>", self._on_right_click)
-        self._frame.bind("<Button-3>", self._on_right_click)
+        self._canvas.bind("<ButtonPress-1>", self._on_drag_start)
+        self._canvas.bind("<B1-Motion>", self._on_drag_move)
+        self._canvas.bind("<ButtonRelease-1>", self._on_drag_end)
+        self._canvas.bind("<Button-3>", self._on_right_click)
 
         # Restore saved position
         config = _load_config()
@@ -955,7 +952,6 @@ class FloatingWidget:
         if wx is not None and wy is not None:
             self._root.geometry(f"+{wx}+{wy}")
         else:
-            # Default: top-left corner
             self._root.geometry("+8+4")
 
         self._visible = config.get("show_widget", True)
@@ -968,6 +964,130 @@ class FloatingWidget:
         if pct >= 50:
             return self.YELLOW
         return self.GREEN
+
+    def _bar_bg_color(self):
+        return "#1A1B26"
+
+    def _round_rect(self, canvas, x1, y1, x2, y2, r, **kwargs):
+        """Draw a rounded rectangle on canvas."""
+        points = [
+            x1 + r, y1, x2 - r, y1,
+            x2, y1, x2, y1 + r,
+            x2, y2 - r, x2, y2,
+            x2 - r, y2, x1 + r, y2,
+            x1, y2, x1, y2 - r,
+            x1, y1 + r, x1, y1,
+        ]
+        return canvas.create_polygon(points, smooth=True, **kwargs)
+
+    def _build(self, data):
+        """Build canvas items for the first time."""
+        c = self._canvas
+        config = data.get("config", {})
+
+        show_sess = config.get("show_session", True)
+        show_week = config.get("show_week", True)
+        show_sonnet = config.get("show_sonnet", True) and data.get("sonnet_pct") is not None
+
+        # Calculate width
+        sections = []
+        if show_sess:
+            sections.append("session")
+        if show_week:
+            sections.append("week")
+        if show_sonnet:
+            sections.append("sonnet")
+
+        # Layout: icon(16) + pad(8) + [label(28) + bar(50) + pct(36) + sep(12)] * n
+        section_w = 28 + self.BAR_W + 38
+        pad_left = 12
+        icon_w = 14
+        gap = 8
+        sep_w = 16
+        total_w = pad_left + icon_w + gap + len(sections) * section_w + (len(sections) - 1) * sep_w + 12
+        total_h = 28
+
+        c.config(width=total_w, height=total_h)
+        self._root.geometry(f"{total_w}x{total_h}")
+
+        # Background rounded rect
+        self._round_rect(c, 0, 0, total_w, total_h, 6,
+                         fill=self.BG_INNER, outline=self.BORDER, width=1)
+
+        # Cloud icon
+        c.create_text(pad_left + 7, total_h // 2, text="\u2601",
+                      font=("Segoe UI", 10), fill=self.ACCENT, anchor="center")
+
+        cx = pad_left + icon_w + gap
+
+        label_map = {"session": "5h", "week": "7d", "sonnet": "So"}
+
+        for i, key in enumerate(sections):
+            # Separator before (except first)
+            if i > 0:
+                sep_x = cx + 2
+                self._sep_items[key] = c.create_text(
+                    sep_x, total_h // 2, text="|", font=("Segoe UI", 8),
+                    fill=self.SEP, anchor="center")
+                cx += sep_w
+
+            # Label
+            self._items[f"{key}_label"] = c.create_text(
+                cx + 14, total_h // 2, text=label_map[key],
+                font=("Segoe UI Semibold", 9, "bold"), fill=self.DIM, anchor="center")
+            cx += 28
+
+            # Progress bar background (rounded)
+            bar_y = (total_h - self.BAR_H) // 2
+            self._round_rect(c, cx, bar_y, cx + self.BAR_W, bar_y + self.BAR_H, 3,
+                             fill=self._bar_bg_color(), outline="")
+            # Progress bar fill
+            self._bar_items[key] = self._round_rect(
+                c, cx, bar_y, cx + 1, bar_y + self.BAR_H, 3,
+                fill=self.GREEN, outline="")
+            cx += self.BAR_W + 4
+
+            # Percentage text
+            self._items[f"{key}_pct"] = c.create_text(
+                cx + 16, total_h // 2, text="0%",
+                font=("Segoe UI Semibold", 9, "bold"), fill=self.GREEN, anchor="center")
+            cx += 34
+
+        self._sections = sections
+        self._total_h = total_h
+        self._built = True
+
+    def _update_bars(self, data):
+        """Update bar fills and percentage text."""
+        c = self._canvas
+        config = data.get("config", {})
+        api_ok = data.get("api_ok", False)
+        est = "~" if not api_ok else ""
+
+        pct_map = {
+            "session": data.get("sess_pct", 0),
+            "week": data.get("week_pct", 0),
+            "sonnet": data.get("sonnet_pct", 0) or 0,
+        }
+
+        for key in self._sections:
+            pct = pct_map.get(key, 0)
+            color = self._color_for_pct(pct)
+
+            # Update bar fill width
+            coords = c.coords(self._bar_items[key])
+            if len(coords) >= 12:
+                x1 = coords[0] - 3  # account for rounded rect offset
+                bar_y = (self._total_h - self.BAR_H) // 2
+                fill_w = max(1, round(self.BAR_W * min(pct, 100) / 100))
+                c.delete(self._bar_items[key])
+                self._bar_items[key] = self._round_rect(
+                    c, x1, bar_y, x1 + fill_w, bar_y + self.BAR_H, 3,
+                    fill=color, outline="")
+
+            # Update percentage text
+            c.itemconfigure(self._items[f"{key}_pct"],
+                           text=f"{est}{pct:.0f}%", fill=color)
 
     def _on_drag_start(self, event):
         self._drag_data["x"] = event.x
@@ -991,41 +1111,13 @@ class FloatingWidget:
         _save_config(config)
 
     def update(self, data):
-        """Update widget labels from usage data. Must be called from tk thread."""
+        """Update widget from usage data. Must be called from tk thread."""
         if not data:
             return
 
-        config = data.get("config", {})
-        api_ok = data.get("api_ok", False)
-        est = "~" if not api_ok else ""
-
-        sess_pct = data.get("sess_pct", 0)
-        week_pct = data.get("week_pct", 0)
-        sonnet_pct = data.get("sonnet_pct")
-
-        if config.get("show_session", True):
-            self._labels["session"].config(
-                text=f"5h:{est}{sess_pct:.0f}%",
-                fg=self._color_for_pct(sess_pct))
-            self._labels["session"].pack(side="left", padx=(0, 6))
-        else:
-            self._labels["session"].pack_forget()
-
-        if config.get("show_week", True):
-            self._labels["week"].config(
-                text=f"7d:{est}{week_pct:.0f}%",
-                fg=self._color_for_pct(week_pct))
-            self._labels["week"].pack(side="left", padx=(0, 6))
-        else:
-            self._labels["week"].pack_forget()
-
-        if config.get("show_sonnet", True) and sonnet_pct is not None:
-            self._labels["sonnet"].config(
-                text=f"Sonnet:{sonnet_pct:.0f}%",
-                fg=self._color_for_pct(sonnet_pct))
-            self._labels["sonnet"].pack(side="left", padx=(0, 2))
-        else:
-            self._labels["sonnet"].pack_forget()
+        if not self._built:
+            self._build(data)
+        self._update_bars(data)
 
     def show(self):
         self._visible = True

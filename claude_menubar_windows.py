@@ -997,14 +997,21 @@ class ClaudeUsageTray:
                 self._alerted[key] = set()
                 self._last_reset[key] = reset_time
 
+            # Find the highest un-notified threshold that has been crossed
+            fired = None
             for threshold in ALERT_THRESHOLDS:
                 if pct >= threshold and threshold not in self._alerted[key]:
-                    self._alerted[key].add(threshold)
-                    reset_msg = f" | Resets: {_fmt_reset(reset_time)}" if reset_time else ""
-                    _send_notification(
-                        title=f"Claude Usage {threshold}%",
-                        message=f"{label}: {pct:.0f}%{reset_msg}",
-                    )
+                    fired = threshold
+            if fired is not None:
+                # Mark all thresholds up to the fired one as alerted
+                for threshold in ALERT_THRESHOLDS:
+                    if threshold <= fired:
+                        self._alerted[key].add(threshold)
+                reset_msg = f" | Resets: {_fmt_reset(reset_time)}" if reset_time else ""
+                _send_notification(
+                    title=f"Claude Usage {fired}%",
+                    message=f"{label}: {pct:.0f}%{reset_msg}",
+                )
 
     def _build_menu(self, data=None):
         """Build pystray menu from usage data."""

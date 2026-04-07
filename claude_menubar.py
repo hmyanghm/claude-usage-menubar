@@ -340,6 +340,42 @@ def _restart_app():
     rumps.quit_application()
 
 
+def _make_label(text):
+    """Create a non-clickable menu item with normal (white) text.
+    Uses a custom NSView so macOS cannot override the text color.
+    """
+    try:
+        import AppKit
+        item = rumps.MenuItem(text, callback=None)
+        ns_item = item._menuitem
+
+        font = AppKit.NSFont.menuFontOfSize_(14)
+        color = AppKit.NSColor.secondaryLabelColor()
+        attrs = {
+            AppKit.NSFontAttributeName: font,
+            AppKit.NSForegroundColorAttributeName: color,
+        }
+        attr_str = AppKit.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+        size = attr_str.size()
+
+        # Create a text field inside a view
+        text_field = AppKit.NSTextField.labelWithAttributedString_(attr_str)
+        text_field.setSelectable_(False)
+        text_field.setBezeled_(False)
+        text_field.setDrawsBackground_(False)
+
+        view = AppKit.NSView.alloc().initWithFrame_(
+            ((0, 0), (max(size.width + 28, 300), size.height + 8))
+        )
+        text_field.setFrame_(((14, 4), (size.width + 14, size.height)))
+        view.addSubview_(text_field)
+
+        ns_item.setView_(view)
+        return item
+    except Exception:
+        return rumps.MenuItem(text, callback=None)
+
+
 def _send_notification(title, message):
     """Send macOS notification via osascript."""
     try:
@@ -1127,7 +1163,7 @@ class ClaudeUsageApp(rumps.App):
         try:
             self._build_dashboard(force_api=force_api)
         except Exception as e:
-            self.menu.add(rumps.MenuItem(f"⚠️ 오류: {e}", callback=None))
+            self.menu.add(_make_label(f"⚠️ 오류: {e}"))
         self.menu.add(rumps.separator)
         self.menu.add(rumps.MenuItem("🔄 새로고침", callback=self._refresh))
         self._add_settings_menu()
@@ -1199,90 +1235,77 @@ class ClaudeUsageApp(rumps.App):
         acct_name = _api_cache.get("account_name")
         if acct_email:
             label = f"👤 {acct_name} ({acct_email})" if acct_name else f"👤 {acct_email}"
-            self.menu.add(rumps.MenuItem(label, callback=None))
+            self.menu.add(_make_label(label))
             self.menu.add(rumps.separator)
 
         # ── API status indicator ──
         if not api:
-            self.menu.add(rumps.MenuItem("⚠️ Usage API 일시 장애", callback=None))
+            self.menu.add(_make_label("⚠️ Usage API 일시 장애"))
             self.menu.add(rumps.separator)
         elif api_stale:
             ago = int(time.time() - _api_cache["fetched_at"])
-            self.menu.add(rumps.MenuItem(f"⏳ 캐시 데이터 ({ago}초 전)", callback=None))
+            self.menu.add(_make_label(f"⏳ 캐시 데이터 ({ago}초 전)"))
             self.menu.add(rumps.separator)
 
         # ── Current session ──
         est = "" if api_ok else " (예상)"
         if config.get("show_session", True):
-            self.menu.add(rumps.MenuItem(f"Current session{est}", callback=None))
-            self.menu.add(rumps.MenuItem(f"  {make_bar(sess_pct)}", callback=None))
+            self.menu.add(_make_label(f"Current session{est}"))
+            self.menu.add(_make_label(f"  {make_bar(sess_pct)}"))
             if sess_reset:
-                self.menu.add(rumps.MenuItem(
-                    f"  Resets {_fmt_reset(sess_reset)}",
-                    callback=None,
-                ))
+                self.menu.add(_make_label(f"  Resets {_fmt_reset(sess_reset)}"))
             self.menu.add(rumps.separator)
 
         # ── Current week (all models) ──
         if config.get("show_week", True):
-            self.menu.add(rumps.MenuItem(f"Current week (all models){est}", callback=None))
-            self.menu.add(rumps.MenuItem(f"  {make_bar(week_pct)}", callback=None))
+            self.menu.add(_make_label(f"Current week (all models){est}"))
+            self.menu.add(_make_label(f"  {make_bar(week_pct)}"))
             if week_reset:
-                self.menu.add(rumps.MenuItem(
-                    f"  Resets {_fmt_reset(week_reset)}",
-                    callback=None,
-                ))
+                self.menu.add(_make_label(f"  Resets {_fmt_reset(week_reset)}"))
             self.menu.add(rumps.separator)
 
         # ── Current week (Sonnet only) ──
         if config.get("show_sonnet", True) and sonnet_pct is not None:
-            self.menu.add(rumps.MenuItem("Current week (Sonnet only)", callback=None))
-            self.menu.add(rumps.MenuItem(f"  {make_bar(sonnet_pct)}", callback=None))
+            self.menu.add(_make_label("Current week (Sonnet only)"))
+            self.menu.add(_make_label(f"  {make_bar(sonnet_pct)}"))
             if sonnet_reset:
-                self.menu.add(rumps.MenuItem(
-                    f"  Resets {_fmt_reset(sonnet_reset)}",
-                    callback=None,
-                ))
+                self.menu.add(_make_label(f"  Resets {_fmt_reset(sonnet_reset)}"))
             self.menu.add(rumps.separator)
 
         # ── Detail breakdown (submenu) ──
         detail = rumps.MenuItem("📊 세부 사용량")
 
         # Today
-        detail.add(rumps.MenuItem("── 오늘 ──", callback=None))
-        detail.add(rumps.MenuItem(
+        detail.add(_make_label("── 오늘 ──"))
+        detail.add(_make_label(
             f"  토큰  {fmt_tokens(today_totals.get('total', 0))}  "
-            f"(입력 {fmt_tokens(today_totals.get('input', 0))} / 출력 {fmt_tokens(today_totals.get('output', 0))})",
-            callback=None,
+            f"(입력 {fmt_tokens(today_totals.get('input', 0))} / 출력 {fmt_tokens(today_totals.get('output', 0))})"
         ))
-        detail.add(rumps.MenuItem(f"  비용  {fmt_cost(today_totals.get('cost', 0))}", callback=None))
-        detail.add(rumps.MenuItem(f"  요청  {today_totals.get('requests', 0)}회", callback=None))
+        detail.add(_make_label(f"  비용  {fmt_cost(today_totals.get('cost', 0))}"))
+        detail.add(_make_label(f"  요청  {today_totals.get('requests', 0)}회"))
 
         # Session
         detail.add(rumps.separator)
-        detail.add(rumps.MenuItem("── 세션 (5시간) ──", callback=None))
-        detail.add(rumps.MenuItem(
+        detail.add(_make_label("── 세션 (5시간) ──"))
+        detail.add(_make_label(
             f"  토큰  {fmt_tokens(sess_tokens)}  "
-            f"(입력 {fmt_tokens(sess_totals.get('input', 0))} / 출력 {fmt_tokens(sess_totals.get('output', 0))})",
-            callback=None,
+            f"(입력 {fmt_tokens(sess_totals.get('input', 0))} / 출력 {fmt_tokens(sess_totals.get('output', 0))})"
         ))
         if sess_totals.get("cache_write", 0) or sess_totals.get("cache_read", 0):
-            detail.add(rumps.MenuItem(
-                f"  캐시  생성 {fmt_tokens(sess_totals.get('cache_write', 0))} / 읽기 {fmt_tokens(sess_totals.get('cache_read', 0))}",
-                callback=None,
+            detail.add(_make_label(
+                f"  캐시  생성 {fmt_tokens(sess_totals.get('cache_write', 0))} / 읽기 {fmt_tokens(sess_totals.get('cache_read', 0))}"
             ))
-        detail.add(rumps.MenuItem(f"  비용  {fmt_cost(sess_totals.get('cost', 0))}", callback=None))
+        detail.add(_make_label(f"  비용  {fmt_cost(sess_totals.get('cost', 0))}"))
 
         # Week
         detail.add(rumps.separator)
-        detail.add(rumps.MenuItem("── 이번 주 (7일) ──", callback=None))
-        detail.add(rumps.MenuItem(
+        detail.add(_make_label("── 이번 주 (7일) ──"))
+        detail.add(_make_label(
             f"  토큰  {fmt_tokens(week_tokens)}  "
-            f"(입력 {fmt_tokens(week_totals.get('input', 0))} / 출력 {fmt_tokens(week_totals.get('output', 0))})",
-            callback=None,
+            f"(입력 {fmt_tokens(week_totals.get('input', 0))} / 출력 {fmt_tokens(week_totals.get('output', 0))})"
         ))
-        detail.add(rumps.MenuItem(f"  비용  {fmt_cost(week_totals.get('cost', 0))}", callback=None))
-        detail.add(rumps.MenuItem(f"  요청  {week_totals.get('requests', 0)}회", callback=None))
+        detail.add(_make_label(f"  비용  {fmt_cost(week_totals.get('cost', 0))}"))
+        detail.add(_make_label(f"  요청  {week_totals.get('requests', 0)}회"))
 
         self.menu.add(detail)
 
@@ -1293,9 +1316,8 @@ class ClaudeUsageApp(rumps.App):
                 d = week_models[m]
                 total_t = sum(d.values())
                 short = m.split("/")[-1] if "/" in m else m
-                model_menu.add(rumps.MenuItem(
-                    f"  {short}: {fmt_tokens(total_t)}  {fmt_cost(week_costs[m])}",
-                    callback=None,
+                model_menu.add(_make_label(
+                    f"  {short}: {fmt_tokens(total_t)}  {fmt_cost(week_costs[m])}"
                 ))
             self.menu.add(model_menu)
 
@@ -1310,9 +1332,8 @@ class ClaudeUsageApp(rumps.App):
             if max(costs) > 0:
                 bar_len = round(cost / max(costs) * 10)
             bar = "█" * bar_len + "░" * (10 - bar_len)
-            history_menu.add(rumps.MenuItem(
-                f"  {date_str}  {bar}  {fmt_cost(cost)}",
-                callback=None,
+            history_menu.add(_make_label(
+                f"  {date_str}  {bar}  {fmt_cost(cost)}"
             ))
         self.menu.add(history_menu)
 
@@ -1321,17 +1342,17 @@ class ClaudeUsageApp(rumps.App):
             rec = _recommend_plan(self.tracker, _api_cache)
             rec_menu = rumps.MenuItem("💡 플랜 추천")
 
-            rec_menu.add(rumps.MenuItem(f"  현재 플랜: {rec['current_plan']}", callback=None))
+            rec_menu.add(_make_label(f"  현재 플랜: {rec['current_plan']}"))
             rec_menu.add(rumps.separator)
 
-            rec_menu.add(rumps.MenuItem("── 사용량 분석 ──", callback=None))
-            rec_menu.add(rumps.MenuItem(f"  30일 비용: {fmt_cost(rec['total_30d'])} ({rec['active_days']}일 활성)", callback=None))
-            rec_menu.add(rumps.MenuItem(f"  피크 주간: {fmt_cost(rec['peak_week_cost'])}", callback=None))
+            rec_menu.add(_make_label("── 사용량 분석 ──"))
+            rec_menu.add(_make_label(f"  30일 비용: {fmt_cost(rec['total_30d'])} ({rec['active_days']}일 활성)"))
+            rec_menu.add(_make_label(f"  피크 주간: {fmt_cost(rec['peak_week_cost'])}"))
             if rec['opus_ratio'] > 0.01:
-                rec_menu.add(rumps.MenuItem(f"  Opus 비중: {rec['opus_ratio']:.0%}", callback=None))
+                rec_menu.add(_make_label(f"  Opus 비중: {rec['opus_ratio']:.0%}"))
             rec_menu.add(rumps.separator)
 
-            rec_menu.add(rumps.MenuItem("── 플랜별 비교 ──", callback=None))
+            rec_menu.add(_make_label("── 플랜별 비교 ──"))
             for pf in rec['plan_fits']:
                 usage_pct = pf['usage_pct']
                 if usage_pct > 100:
@@ -1342,24 +1363,22 @@ class ClaudeUsageApp(rumps.App):
                     status = "🟢 여유"
                 is_rec = " ⭐" if pf['name'] == rec['recommended'] else ""
                 is_cur = " (현재)" if pf['name'] == rec['current_plan'] else ""
-                rec_menu.add(rumps.MenuItem(
-                    f"  {status}  {pf['name']} ${pf['price']}/월  — 한도의 {usage_pct:.0f}% 사용{is_rec}{is_cur}",
-                    callback=None,
+                rec_menu.add(_make_label(
+                    f"  {status}  {pf['name']} ${pf['price']}/월  — 한도의 {usage_pct:.0f}% 사용{is_rec}{is_cur}"
                 ))
             rec_menu.add(rumps.separator)
 
             star = "⭐ " if rec['recommended'] != rec['current_plan'] else "✓ "
-            rec_menu.add(rumps.MenuItem(
-                f"  {star}추천: {rec['recommended']} (${rec['rec_price']}/월)",
-                callback=None,
+            rec_menu.add(_make_label(
+                f"  {star}추천: {rec['recommended']} (${rec['rec_price']}/월)"
             ))
             for r in rec['reasons']:
-                rec_menu.add(rumps.MenuItem(f"    → {r}", callback=None))
+                rec_menu.add(_make_label(f"    → {r}"))
 
             if rec['savings']:
-                rec_menu.add(rumps.MenuItem(f"  💰 월 ${rec['savings']} 절약 가능", callback=None))
+                rec_menu.add(_make_label(f"  💰 월 ${rec['savings']} 절약 가능"))
             elif rec['recommended'] == rec['current_plan']:
-                rec_menu.add(rumps.MenuItem("  ✅ 현재 플랜이 적합합니다", callback=None))
+                rec_menu.add(_make_label("  ✅ 현재 플랜이 적합합니다"))
 
             self.menu.add(rec_menu)
         except Exception as e:
@@ -1385,15 +1404,22 @@ class ClaudeUsageApp(rumps.App):
                 self._alerted[key] = set()
                 self._last_reset[key] = reset_time
 
+            # Find the highest un-notified threshold that has been crossed
+            fired = None
             for threshold in ALERT_THRESHOLDS:
                 if pct >= threshold and threshold not in self._alerted[key]:
-                    self._alerted[key].add(threshold)
-                    reset_msg = f" | 리셋: {_fmt_reset(reset_time)}" if reset_time else ""
-                    _send_notification(
-                        title=f"⚡ Claude 사용량 {threshold}% 도달",
-                        message=f"{label} 사용률: {pct:.0f}%{reset_msg}",
-                    )
-                    print(f"[ALERT] {label} {pct:.0f}% >= {threshold}%", flush=True)
+                    fired = threshold
+            if fired is not None:
+                # Mark all thresholds up to the fired one as alerted
+                for threshold in ALERT_THRESHOLDS:
+                    if threshold <= fired:
+                        self._alerted[key].add(threshold)
+                reset_msg = f" | 리셋: {_fmt_reset(reset_time)}" if reset_time else ""
+                _send_notification(
+                    title=f"⚡ Claude 사용량 {fired}% 도달",
+                    message=f"{label} 사용률: {pct:.0f}%{reset_msg}",
+                )
+                print(f"[ALERT] {label} {pct:.0f}% >= {fired}%", flush=True)
 
     # ── settings menu ────────────────────────────────────────────────────
 

@@ -1007,7 +1007,7 @@ class FloatingWidget:
         if config.get("show_session", True):
             bar = self._mini_bar(sess_pct)
             self._labels["session"].config(
-                text=f"S  {bar}  {est}{sess_pct:.0f}%",
+                text=f"5h      {bar}  {est}{sess_pct:.0f}%",
                 fg=self._color_for_pct(sess_pct))
             self._labels["session"].pack(anchor="w")
         else:
@@ -1016,7 +1016,7 @@ class FloatingWidget:
         if config.get("show_week", True):
             bar = self._mini_bar(week_pct)
             self._labels["week"].config(
-                text=f"W  {bar}  {est}{week_pct:.0f}%",
+                text=f"7d      {bar}  {est}{week_pct:.0f}%",
                 fg=self._color_for_pct(week_pct))
             self._labels["week"].pack(anchor="w")
         else:
@@ -1025,7 +1025,7 @@ class FloatingWidget:
         if config.get("show_sonnet", True) and sonnet_pct is not None:
             bar = self._mini_bar(sonnet_pct)
             self._labels["sonnet"].config(
-                text=f"So {bar}  {sonnet_pct:.0f}%",
+                text=f"Sonnet  {bar}  {sonnet_pct:.0f}%",
                 fg=self._color_for_pct(sonnet_pct))
             self._labels["sonnet"].pack(anchor="w")
         else:

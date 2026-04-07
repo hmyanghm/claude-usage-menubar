@@ -29,29 +29,49 @@ Anthropic API 연동으로 `/usage`와 동일한 데이터를 5분마다 자동 
 - 세션(5h), 주간(전 모델), 주간(Sonnet) 프로그레스 바
 - 리셋 시각 표시 (KST)
 
+### 세부 사용량
+오늘, 세션(5시간), 이번 주(7일) 단위로 토큰, 비용, 요청 수를 상세하게 보여줍니다.
+
+<p align="center">
+  <img src="screenshots/detail-usage.png" alt="세부 사용량" width="400">
+</p>
+
 ### 모델별 사용량
 어떤 모델에 토큰과 비용을 얼마나 쓰고 있는지 한눈에 확인할 수 있습니다.
 
 <p align="center">
-  <img src="screenshots/model-breakdown.png" alt="모델별 사용량" width="400">
+  <img src="screenshots/model-breakdown-v2.png" alt="모델별 사용량" width="400">
 </p>
 
 ### 7일 사용량 히스토리
-스파크라인 차트와 일별 비용 상세로 사용 패턴을 파악하세요.
+일별 비용 차트로 사용 패턴을 파악하세요.
 
 <p align="center">
-  <img src="screenshots/7day-history.png" alt="7일 히스토리" width="400">
+  <img src="screenshots/7day-history-v2.png" alt="7일 히스토리" width="400">
 </p>
 
 ### 플랜 추천
 30일 사용량을 분석해서 Pro / Max 5x / Max 20x 중 나에게 맞는 플랜을 추천합니다.
 
 <p align="center">
-  <img src="screenshots/plan-recommendation.png" alt="플랜 추천" width="400">
+  <img src="screenshots/plan-recommendation-v2.png" alt="플랜 추천" width="400">
+</p>
+
+### 사용량 알림
+세션 또는 주간 사용량이 80%, 90%에 도달하면 시스템 알림으로 알려줍니다.
+
+<p align="center">
+  <img src="screenshots/notification.png" alt="사용량 알림" width="400">
+</p>
+
+### 표시 설정
+메뉴바 타이틀, 표시 항목, 알림 등을 커스터마이즈할 수 있습니다.
+
+<p align="center">
+  <img src="screenshots/settings.png" alt="표시 설정" width="300">
 </p>
 
 ### 기타
-- **사용량 임계치 알림** — 80%, 90% 도달 시 시스템 알림 (세션 + 주간)
 - **OAuth 토큰 자동 갱신** — refresh token으로 만료 시 자동 갱신
 - **자동 업데이트 확인** — 1시간마다 GitHub releases 확인
 - **로그인 시 자동 시작** (선택)

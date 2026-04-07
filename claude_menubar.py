@@ -25,7 +25,7 @@ import rumps
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "2.0.0"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -374,6 +374,282 @@ def _make_label(text):
         return item
     except Exception:
         return rumps.MenuItem(text, callback=None)
+
+
+
+# ─── NSPopover UI Components ───────────────────────────────────────────────
+
+import AppKit
+import objc
+from Foundation import NSObject, NSRect, NSSize, NSPoint, NSMakeRect
+
+# Color constants
+_BG_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.12, 0.14, 1.0)
+_CARD_BG_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.06)
+_CARD_BORDER_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.10)
+_TEXT_PRIMARY = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.90)
+_TEXT_SECONDARY = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.60)
+_PROGRESS_BG = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.10)
+_GREEN = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.204, 0.78, 0.349, 1.0)   # #34C759
+_YELLOW = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.84, 0.039, 1.0)    # #FFD60A
+_RED = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.271, 0.227, 1.0)       # #FF453A
+_SEPARATOR_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.08)
+
+POPOVER_WIDTH = 320
+CARD_INSET = 12       # horizontal padding inside popover
+CARD_PADDING = 10     # padding inside cards
+CARD_SPACING = 8      # vertical spacing between cards
+INNER_SPACING = 4     # spacing between elements inside a card
+
+
+def _progress_color(pct):
+    """Return green/yellow/red based on percentage."""
+    if pct >= 80:
+        return _RED
+    elif pct >= 60:
+        return _YELLOW
+    return _GREEN
+
+
+def _make_text_field(text, font_size=12, color=None, bold=False, align=None):
+    """Create an NSTextField label."""
+    if color is None:
+        color = _TEXT_PRIMARY
+    if bold:
+        font = AppKit.NSFont.boldSystemFontOfSize_(font_size)
+    else:
+        font = AppKit.NSFont.systemFontOfSize_(font_size)
+    tf = AppKit.NSTextField.labelWithString_(text)
+    tf.setFont_(font)
+    tf.setTextColor_(color)
+    tf.setDrawsBackground_(False)
+    tf.setBezeled_(False)
+    tf.setEditable_(False)
+    tf.setSelectable_(False)
+    tf.setLineBreakMode_(AppKit.NSLineBreakByTruncatingTail)
+    if align is not None:
+        tf.setAlignment_(align)
+    return tf
+
+
+class ProgressBarView(AppKit.NSView):
+    """Custom NSView that draws a rounded progress bar."""
+
+    def initWithFrame_percentage_color_(self, frame, pct, color):
+        self = objc.super(ProgressBarView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._pct = max(0, min(100, pct))
+        self._color = color
+        return self
+
+    def drawRect_(self, dirty_rect):
+        bounds = self.bounds()
+        h = bounds.size.height
+        w = bounds.size.width
+        radius = h / 2.0
+
+        # Background
+        bg_path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(0, 0, w, h), radius, radius
+        )
+        _PROGRESS_BG.setFill()
+        bg_path.fill()
+
+        # Filled portion
+        if self._pct > 0:
+            fill_w = max(h, w * self._pct / 100.0)  # at least pill-sized
+            fill_path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(0, 0, fill_w, h), radius, radius
+            )
+            self._color.setFill()
+            fill_path.fill()
+
+
+class CardView(AppKit.NSView):
+    """A rounded card container view with dark background and border."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(CardView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.setWantsLayer_(True)
+        self.layer().setCornerRadius_(8.0)
+        self.layer().setBackgroundColor_(_CARD_BG_COLOR.CGColor())
+        self.layer().setBorderColor_(_CARD_BORDER_COLOR.CGColor())
+        self.layer().setBorderWidth_(0.5)
+        return self
+
+
+class HistoryBarView(AppKit.NSView):
+    """Custom view for a single day bar in the 7-day history."""
+
+    def initWithFrame_fillRatio_color_(self, frame, ratio, color):
+        self = objc.super(HistoryBarView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._ratio = max(0, min(1.0, ratio))
+        self._color = color
+        return self
+
+    def drawRect_(self, dirty_rect):
+        bounds = self.bounds()
+        w = bounds.size.width
+        h = bounds.size.height
+        fill_h = max(2, h * self._ratio)
+        radius = min(2.0, w / 2.0)
+
+        bar_rect = NSMakeRect(0, 0, w, fill_h)
+        path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            bar_rect, radius, radius
+        )
+        self._color.setFill()
+        path.fill()
+
+
+def _build_card(content_height):
+    """Create a CardView with given content height, full width minus insets."""
+    card_w = POPOVER_WIDTH - 2 * CARD_INSET
+    card = CardView.alloc().initWithFrame_(NSMakeRect(0, 0, card_w, content_height + 2 * CARD_PADDING))
+    return card
+
+
+def _add_to_card(card, subview, x, y):
+    """Add subview at (x + CARD_PADDING, y + CARD_PADDING) inside card."""
+    frame = subview.frame()
+    subview.setFrame_(NSMakeRect(x + CARD_PADDING, y + CARD_PADDING, frame.size.width, frame.size.height))
+    card.addSubview_(subview)
+
+
+def _build_progress_section(label_text, pct, reset_text=None, is_estimate=False):
+    """Build a card with label, progress bar, percentage, and optional reset time."""
+    card_inner_w = POPOVER_WIDTH - 2 * CARD_INSET - 2 * CARD_PADDING
+    bar_height = 8
+    elements_height = 16 + INNER_SPACING + bar_height + INNER_SPACING + 14
+    if reset_text:
+        elements_height += INNER_SPACING + 12
+    card = _build_card(elements_height)
+
+    y = elements_height  # Build top-down, place bottom-up
+
+    # Label
+    suffix = " (예상)" if is_estimate else ""
+    lbl = _make_text_field(label_text + suffix, font_size=11, color=_TEXT_SECONDARY)
+    lbl.sizeToFit()
+    y -= 14
+    _add_to_card(card, lbl, 0, y)
+
+    # Progress bar
+    color = _progress_color(pct)
+    y -= (INNER_SPACING + bar_height)
+    bar = ProgressBarView.alloc().initWithFrame_percentage_color_(
+        NSMakeRect(0, 0, card_inner_w, bar_height), pct, color
+    )
+    _add_to_card(card, bar, 0, y)
+
+    # Percentage text (right-aligned)
+    pct_text = f"{pct:.0f}%"
+    pct_tf = _make_text_field(pct_text, font_size=13, color=color, bold=True)
+    pct_tf.sizeToFit()
+    pct_w = pct_tf.frame().size.width
+    y -= (INNER_SPACING + 14)
+    pct_tf.setFrame_(NSMakeRect(
+        CARD_PADDING + card_inner_w - pct_w,
+        y + CARD_PADDING,
+        pct_w, 14
+    ))
+    card.addSubview_(pct_tf)
+
+    # Reset time (if available)
+    if reset_text:
+        reset_tf = _make_text_field(f"Resets {reset_text}", font_size=10, color=_TEXT_SECONDARY)
+        reset_tf.sizeToFit()
+        _add_to_card(card, reset_tf, 0, y - INNER_SPACING - 12)
+
+    return card
+
+
+class PopoverToggleTarget(NSObject):
+    """NSObject subclass to serve as the action target for the status bar button."""
+
+    def initWithApp_(self, app):
+        self = objc.super(PopoverToggleTarget, self).init()
+        if self is None:
+            return None
+        self._app = app
+        return self
+
+    @objc.typedSelector(b"v@:@")
+    def togglePopover_(self, sender):
+        self._app.toggle_popover(sender)
+
+
+class _ButtonAction(NSObject):
+    """NSObject subclass to serve as action target for buttons with a Python callback."""
+
+    def initWithCallback_(self, callback):
+        self = objc.super(_ButtonAction, self).init()
+        if self is None:
+            return None
+        self._callback = callback
+        return self
+
+    @objc.typedSelector(b"v@:@")
+    def perform_(self, sender):
+        if self._callback:
+            self._callback()
+
+
+class PopoverViewController(AppKit.NSViewController):
+    """Minimal NSViewController to host popover content."""
+
+    def initWithView_(self, view):
+        self = objc.super(PopoverViewController, self).init()
+        if self is None:
+            return None
+        self._contentView = view
+        return self
+
+    def loadView(self):
+        self.setView_(self._contentView)
+
+
+class HoverButton(AppKit.NSButton):
+    """NSButton subclass with hover highlight effect."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(HoverButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._tracking_area = None
+        self.setWantsLayer_(True)
+        self.layer().setCornerRadius_(4.0)
+        self._updateTrackingArea()
+        return self
+
+    def _updateTrackingArea(self):
+        if self._tracking_area:
+            self.removeTrackingArea_(self._tracking_area)
+        self._tracking_area = AppKit.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            self.bounds(),
+            AppKit.NSTrackingMouseEnteredAndExited | AppKit.NSTrackingActiveAlways,
+            self, None
+        )
+        self.addTrackingArea_(self._tracking_area)
+
+    def updateTrackingAreas(self):
+        objc.super(HoverButton, self).updateTrackingAreas()
+        self._updateTrackingArea()
+
+    def mouseEntered_(self, event):
+        self.layer().setBackgroundColor_(
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1, 1, 1, 0.08).CGColor()
+        )
+
+    def mouseExited_(self, event):
+        self.layer().setBackgroundColor_(
+            AppKit.NSColor.clearColor().CGColor()
+        )
 
 
 def _send_notification(title, message):
@@ -1066,28 +1342,52 @@ class ClaudeUsageApp(rumps.App):
     def __init__(self):
         super().__init__(name="Claude Usage", title="⚡ Claude", quit_button=None)
         self.tracker = UsageTracker()
-        self.view_mode = "dashboard"  # dashboard | detail
-        # Track which alert thresholds have already fired per reset cycle
-        # Keys: "session", "week" — Values: set of thresholds already notified
+        self.view_mode = "dashboard"
         self._alerted = {"session": set(), "week": set()}
-        # Store last known reset times to detect new cycles
         self._last_reset = {"session": None, "week": None}
-        # Defer heavy work (API calls, file I/O) to after the run loop starts
-        self.menu.add(rumps.MenuItem("로딩 중...", callback=None))
-        self.menu.add(rumps.separator)
+        # Popover state
+        self._popover = None
+        self._toggle_target = None
+        self._settings_visible = False
+        self._action_refs = []
+        self._collapse_state = {
+            "detail": False,
+            "model": False,
+            "history": False,
+            "plan": False,
+        }
+        self._cached_data = None
+        # Minimal fallback menu (quit only)
         self.menu.add(rumps.MenuItem("종료", callback=rumps.quit_application))
 
     @rumps.timer(1)
     def _initial_load(self, timer):
-        """First load after run loop starts, then switch to normal refresh interval."""
+        """First load after run loop starts — set up NSPopover."""
         timer.stop()
-        # Hide Dock icon (must be after run loop starts)
+        # Hide Dock icon
         try:
-            import AppKit
             AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
         except Exception:
             pass
-        # Register wake-from-sleep notification
+
+        # Set up NSPopover
+        try:
+            button = self._nsapp.nsstatusitem.button()
+            self._nsapp.nsstatusitem.setMenu_(None)
+
+            self._popover = AppKit.NSPopover.alloc().init()
+            self._popover.setBehavior_(1)  # NSPopoverBehaviorTransient
+            self._popover.setAppearance_(
+                AppKit.NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua")
+            )
+
+            self._toggle_target = PopoverToggleTarget.alloc().initWithApp_(self)
+            button.setTarget_(self._toggle_target)
+            button.setAction_(objc.selector(self._toggle_target.togglePopover_, signature=b'v@:@'))
+            print("[POPOVER] NSPopover set up successfully", flush=True)
+        except Exception as e:
+            print(f"[POPOVER] Setup failed: {e}", flush=True)
+
         self._register_wake_observer()
         try:
             self._rebuild()
@@ -1096,23 +1396,37 @@ class ClaudeUsageApp(rumps.App):
         self._refresh_timer = rumps.Timer(self._on_tick, REFRESH_INTERVAL_SEC)
         self._refresh_timer.start()
 
+    def toggle_popover(self, sender):
+        """Toggle the NSPopover open/closed."""
+        if not self._popover:
+            return
+        if self._popover.isShown():
+            self._popover.close()
+        else:
+            # Refresh data when opening popover
+            try:
+                self._cached_data = self._gather_data()
+            except Exception as e:
+                print(f"[POPOVER] Data gather error: {e}", flush=True)
+            self._rebuild_popover_content()
+            button = self._nsapp.nsstatusitem.button()
+            self._popover.showRelativeToRect_ofView_preferredEdge_(
+                button.bounds(), button, AppKit.NSMinYEdge
+            )
+
     def _register_wake_observer(self):
         """Listen for macOS wake-from-sleep to trigger immediate refresh."""
         try:
-            import AppKit
-            import objc
-
             self._wake_retry_count = 0
             self._wake_retry_timer = None
             self._last_active_time = time.time()
 
-            # Store callback as instance attribute to prevent GC
             def on_wake(_notification):
                 print("[WAKE] System woke from sleep, scheduling refresh...", flush=True)
                 self._wake_retry_count = 0
                 self._start_wake_retry()
 
-            self._on_wake_callback = on_wake  # prevent garbage collection
+            self._on_wake_callback = on_wake
 
             nc = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
             nc.addObserverForName_object_queue_usingBlock_(
@@ -1126,7 +1440,7 @@ class ClaudeUsageApp(rumps.App):
             print(f"[WAKE] Failed to register wake observer: {e}", flush=True)
 
     def _start_wake_retry(self):
-        """Start retry cycle after wake. Delays: 5s, 10s, 20s, 40s, 60s (max 5 retries)."""
+        """Start retry cycle after wake."""
         if self._wake_retry_timer is not None:
             self._wake_retry_timer.stop()
         delays = [5, 10, 20, 40, 60]
@@ -1136,12 +1450,11 @@ class ClaudeUsageApp(rumps.App):
         self._wake_retry_timer.start()
 
     def _wake_refresh(self, timer):
-        """Called after wake-from-sleep. Retries on failure until network is back."""
+        """Called after wake-from-sleep."""
         timer.stop()
         self._wake_retry_timer = None
         max_retries = 5
         try:
-            # Skip network pre-check, just rebuild directly
             print("[WAKE] Attempting refresh...", flush=True)
             self._rebuild(force_api=True)
             self._wake_retry_count = 0
@@ -1152,48 +1465,28 @@ class ClaudeUsageApp(rumps.App):
                 print(f"[WAKE] Refresh failed ({e}), will retry...", flush=True)
                 self._start_wake_retry()
             else:
-                print(f"[WAKE] Max retries reached, giving up. Next regular tick will retry.", flush=True)
+                print("[WAKE] Max retries reached, giving up.", flush=True)
                 self._wake_retry_count = 0
 
-    # ── menu builders ───────────────────────────────────────────────────
+    # ── popover content builder ──────────────────────────────────────────
 
     def _rebuild(self, force_api=False):
+        """Gather data and update title bar. Popover content is built on open."""
         self._last_active_time = time.time()
-        self.menu.clear()
         try:
-            self._build_dashboard(force_api=force_api)
+            self._cached_data = self._gather_data(force_api=force_api)
         except Exception as e:
-            self.menu.add(_make_label(f"⚠️ 오류: {e}"))
-        self.menu.add(rumps.separator)
-        self.menu.add(rumps.MenuItem("🔄 새로고침", callback=self._refresh))
-        self._add_settings_menu()
-        # Update check
-        new_ver, release_url = _check_update()
-        if new_ver:
-            self.menu.add(rumps.MenuItem(
-                f"⬆️ {new_ver} 자동 업데이트",
-                callback=lambda _, v=new_ver: _auto_update(v),
-            ))
-            self.menu.add(rumps.MenuItem(
-                f"🔔 {new_ver} 릴리즈 노트",
-                callback=lambda _: _open_url(release_url),
-            ))
-        self.menu.add(rumps.separator)
-        self.menu.add(rumps.MenuItem(f"v{APP_VERSION}", callback=None))
-        self.menu.add(rumps.MenuItem("종료", callback=rumps.quit_application))
+            print(f"[REBUILD] Error: {e}", flush=True)
+            self._cached_data = None
 
-    def _build_dashboard(self, force_api=False):
+    def _gather_data(self, force_api=False):
+        """Gather all usage data into a dict for popover rendering."""
         config = _load_config()
-
         sess_totals, sess_models, sess_costs = self.tracker.session_usage()
         week_totals, week_models, week_costs = self.tracker.week_usage()
         today_totals, _, _ = self.tracker.today_usage()
 
-        # ── fetch real usage from API ──
         api, api_stale = fetch_usage_api(force=force_api)
-
-        sess_tokens = sess_totals.get("total", 0)
-        week_tokens = week_totals.get("total", 0)
 
         if api and "five_hour" in api:
             sess_pct = api["five_hour"].get("utilization", 0)
@@ -1204,7 +1497,6 @@ class ClaudeUsageApp(rumps.App):
             sonnet_pct = sonnet_data.get("utilization", 0) if sonnet_data else None
             sonnet_reset = _parse_reset_time(sonnet_data.get("resets_at")) if sonnet_data else None
         else:
-            # API unavailable — estimate from local cost data
             sess_limit, week_limit = _estimate_limits()
             sess_cost = sess_totals.get("cost", 0)
             week_cost = week_totals.get("cost", 0)
@@ -1216,180 +1508,507 @@ class ClaudeUsageApp(rumps.App):
             sonnet_reset = None
 
         api_ok = api and "five_hour" in api
-
-        # ── check threshold alerts ──
         self._check_alerts(sess_pct, sess_reset, week_pct, week_reset)
 
-        # ── update title bar based on config ──
+        # Update title bar
         stale_mark = "~" if (api_stale or not api_ok) else ""
         title_mode = config.get("title_display", "session")
         if title_mode == "week":
             self.title = f"⚡ {stale_mark}{week_pct:.0f}%"
         elif title_mode == "both":
             self.title = f"⚡ {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
-        else:  # "session" (default)
+        else:
             self.title = f"⚡ {stale_mark}{sess_pct:.0f}%"
 
-        # ── Account info ──
+        daily = self.tracker.daily_costs(7)
+        try:
+            rec = _recommend_plan(self.tracker, _api_cache)
+        except Exception:
+            rec = None
+
+        return {
+            "config": config,
+            "api_ok": api_ok,
+            "api_stale": api_stale,
+            "sess_pct": sess_pct, "sess_reset": sess_reset,
+            "week_pct": week_pct, "week_reset": week_reset,
+            "sonnet_pct": sonnet_pct, "sonnet_reset": sonnet_reset,
+            "sess_totals": sess_totals, "week_totals": week_totals,
+            "today_totals": today_totals,
+            "week_models": week_models, "week_costs": week_costs,
+            "daily": daily,
+            "rec": rec,
+        }
+
+    def _rebuild_popover_content(self):
+        """Build NSViews for the popover content using cached data."""
+        if not self._popover:
+            return
+        self._action_refs = []
+
+        data = self._cached_data
+        if not data:
+            return
+
+        config = data["config"]
+        card_w = POPOVER_WIDTH - 2 * CARD_INSET
+        card_inner_w = card_w - 2 * CARD_PADDING
+        views = []  # list of (view, height)
+
+        # 1. Account info
         acct_email = _api_cache.get("account_email")
         acct_name = _api_cache.get("account_name")
         if acct_email:
-            label = f"👤 {acct_name} ({acct_email})" if acct_name else f"👤 {acct_email}"
-            self.menu.add(_make_label(label))
-            self.menu.add(rumps.separator)
+            label = f"{acct_name} ({acct_email})" if acct_name else acct_email
+            tf = _make_text_field(label, font_size=11, color=_TEXT_SECONDARY)
+            tf.setFrame_(NSMakeRect(CARD_INSET, 0, card_w, 16))
+            views.append((tf, 16))
 
-        # ── API status indicator ──
-        if not api:
-            self.menu.add(_make_label("⚠️ Usage API 일시 장애"))
-            self.menu.add(rumps.separator)
-        elif api_stale:
+        # 2. API status
+        if not data["api_ok"]:
+            tf = _make_text_field("⚠️ Usage API 일시 장애", font_size=11, color=_YELLOW)
+            tf.setFrame_(NSMakeRect(CARD_INSET, 0, card_w, 16))
+            views.append((tf, 16))
+        elif data["api_stale"]:
             ago = int(time.time() - _api_cache["fetched_at"])
-            self.menu.add(_make_label(f"⏳ 캐시 데이터 ({ago}초 전)"))
-            self.menu.add(rumps.separator)
+            tf = _make_text_field(f"⏳ 캐시 데이터 ({ago}초 전)", font_size=11, color=_TEXT_SECONDARY)
+            tf.setFrame_(NSMakeRect(CARD_INSET, 0, card_w, 16))
+            views.append((tf, 16))
 
-        # ── Current session ──
-        est = "" if api_ok else " (예상)"
+        # 3. Session progress card
         if config.get("show_session", True):
-            self.menu.add(_make_label(f"Current session{est}"))
-            self.menu.add(_make_label(f"  {make_bar(sess_pct)}"))
-            if sess_reset:
-                self.menu.add(_make_label(f"  Resets {_fmt_reset(sess_reset)}"))
-            self.menu.add(rumps.separator)
+            est = "" if data["api_ok"] else " (예상)"
+            reset_text = _fmt_reset(data["sess_reset"]) if data["sess_reset"] else None
+            card = _build_progress_section(f"Current session{est}", data["sess_pct"],
+                                           reset_text=reset_text, is_estimate=not data["api_ok"])
+            views.append((card, card.frame().size.height))
 
-        # ── Current week (all models) ──
+        # 4. Week progress card
         if config.get("show_week", True):
-            self.menu.add(_make_label(f"Current week (all models){est}"))
-            self.menu.add(_make_label(f"  {make_bar(week_pct)}"))
-            if week_reset:
-                self.menu.add(_make_label(f"  Resets {_fmt_reset(week_reset)}"))
-            self.menu.add(rumps.separator)
+            est = "" if data["api_ok"] else " (예상)"
+            reset_text = _fmt_reset(data["week_reset"]) if data["week_reset"] else None
+            card = _build_progress_section(f"Current week (all models){est}", data["week_pct"],
+                                           reset_text=reset_text, is_estimate=not data["api_ok"])
+            views.append((card, card.frame().size.height))
 
-        # ── Current week (Sonnet only) ──
-        if config.get("show_sonnet", True) and sonnet_pct is not None:
-            self.menu.add(_make_label("Current week (Sonnet only)"))
-            self.menu.add(_make_label(f"  {make_bar(sonnet_pct)}"))
-            if sonnet_reset:
-                self.menu.add(_make_label(f"  Resets {_fmt_reset(sonnet_reset)}"))
-            self.menu.add(rumps.separator)
+        # 5. Sonnet progress card
+        if config.get("show_sonnet", True) and data["sonnet_pct"] is not None:
+            reset_text = _fmt_reset(data["sonnet_reset"]) if data["sonnet_reset"] else None
+            card = _build_progress_section("Current week (Sonnet only)", data["sonnet_pct"],
+                                           reset_text=reset_text)
+            views.append((card, card.frame().size.height))
 
-        # ── Detail breakdown (submenu) ──
-        detail = rumps.MenuItem("📊 세부 사용량")
+        # 6. Separator
+        sep = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, card_w, 1))
+        sep.setWantsLayer_(True)
+        sep.layer().setBackgroundColor_(_SEPARATOR_COLOR.CGColor())
+        views.append((sep, 1))
 
-        # Today
-        detail.add(_make_label("── 오늘 ──"))
-        detail.add(_make_label(
-            f"  토큰  {fmt_tokens(today_totals.get('total', 0))}  "
-            f"(입력 {fmt_tokens(today_totals.get('input', 0))} / 출력 {fmt_tokens(today_totals.get('output', 0))})"
-        ))
-        detail.add(_make_label(f"  비용  {fmt_cost(today_totals.get('cost', 0))}"))
-        detail.add(_make_label(f"  요청  {today_totals.get('requests', 0)}회"))
+        # 7. Detail usage (collapsible)
+        views.extend(self._build_detail_section(data, card_w, card_inner_w))
+        # 8. Model breakdown (collapsible)
+        views.extend(self._build_model_section(data, card_w, card_inner_w))
+        # 9. 7-day history (collapsible)
+        views.extend(self._build_history_section(data, card_w, card_inner_w))
+        # 10. Plan recommendation (collapsible)
+        views.extend(self._build_plan_section(data, card_w, card_inner_w))
 
-        # Session
-        detail.add(rumps.separator)
-        detail.add(_make_label("── 세션 (5시간) ──"))
-        detail.add(_make_label(
-            f"  토큰  {fmt_tokens(sess_tokens)}  "
-            f"(입력 {fmt_tokens(sess_totals.get('input', 0))} / 출력 {fmt_tokens(sess_totals.get('output', 0))})"
-        ))
-        if sess_totals.get("cache_write", 0) or sess_totals.get("cache_read", 0):
-            detail.add(_make_label(
-                f"  캐시  생성 {fmt_tokens(sess_totals.get('cache_write', 0))} / 읽기 {fmt_tokens(sess_totals.get('cache_read', 0))}"
-            ))
-        detail.add(_make_label(f"  비용  {fmt_cost(sess_totals.get('cost', 0))}"))
+        # 11. Separator
+        sep2 = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, card_w, 1))
+        sep2.setWantsLayer_(True)
+        sep2.layer().setBackgroundColor_(_SEPARATOR_COLOR.CGColor())
+        views.append((sep2, 1))
 
-        # Week
-        detail.add(rumps.separator)
-        detail.add(_make_label("── 이번 주 (7일) ──"))
-        detail.add(_make_label(
-            f"  토큰  {fmt_tokens(week_tokens)}  "
-            f"(입력 {fmt_tokens(week_totals.get('input', 0))} / 출력 {fmt_tokens(week_totals.get('output', 0))})"
-        ))
-        detail.add(_make_label(f"  비용  {fmt_cost(week_totals.get('cost', 0))}"))
-        detail.add(_make_label(f"  요청  {week_totals.get('requests', 0)}회"))
+        # 12. Settings (inline, toggled)
+        if self._settings_visible:
+            views.extend(self._build_settings_views(data, card_w, card_inner_w))
 
-        self.menu.add(detail)
+        # 13. Update notice
+        new_ver, release_url = _check_update()
+        if new_ver:
+            update_card = self._build_update_card(new_ver, release_url, card_w, card_inner_w)
+            views.append((update_card, update_card.frame().size.height))
 
-        # ── Model breakdown (submenu) ──
-        if week_models:
-            model_menu = rumps.MenuItem("🤖 모델별")
-            for m in sorted(week_costs, key=week_costs.get, reverse=True):
-                d = week_models[m]
-                total_t = sum(d.values())
-                short = m.split("/")[-1] if "/" in m else m
-                model_menu.add(_make_label(
-                    f"  {short}: {fmt_tokens(total_t)}  {fmt_cost(week_costs[m])}"
-                ))
-            self.menu.add(model_menu)
+        # 14. Footer
+        footer = self._build_footer(card_w)
+        views.append((footer, footer.frame().size.height))
 
-        # ── Usage history sparkline (submenu) ──
-        daily = self.tracker.daily_costs(7)
+        # Assemble into scroll view
+        total_h = sum(h for _, h in views) + CARD_SPACING * (len(views) + 1)
+        max_h = min(total_h, 500)
+
+        container = AppKit.NSView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, POPOVER_WIDTH, total_h)
+        )
+        container.setWantsLayer_(True)
+        container.layer().setBackgroundColor_(_BG_COLOR.CGColor())
+
+        y = total_h - CARD_SPACING
+        for view, h in views:
+            y -= h
+            frame = view.frame()
+            x = (POPOVER_WIDTH - frame.size.width) / 2.0
+            view.setFrame_(NSMakeRect(x, y, frame.size.width, h))
+            container.addSubview_(view)
+            y -= CARD_SPACING
+
+        scroll = AppKit.NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, POPOVER_WIDTH, max_h)
+        )
+        scroll.setDrawsBackground_(False)
+        scroll.setHasVerticalScroller_(True)
+        scroll.setHasHorizontalScroller_(False)
+        scroll.setAutohidesScrollers_(True)
+        scroll.setDocumentView_(container)
+
+        # Scroll to top
+        container.scrollPoint_(NSPoint(0, total_h))
+
+        vc = PopoverViewController.alloc().initWithView_(scroll)
+        self._popover.setContentSize_(NSSize(POPOVER_WIDTH, max_h))
+        self._popover.setContentViewController_(vc)
+
+    # ── collapsible section helpers ──
+
+    def _make_section_header(self, title, key, card_w):
+        """Create a clickable header for a collapsible section."""
+        expanded = self._collapse_state.get(key, False)
+        arrow = "▼" if expanded else "▶"
+        btn = HoverButton.alloc().initWithFrame_(NSMakeRect(0, 0, card_w, 24))
+        btn.setTitle_(f" {arrow}  {title}")
+        btn.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+        btn.setAlignment_(AppKit.NSTextAlignmentLeft)
+        btn.setBordered_(False)
+        btn.setContentTintColor_(_TEXT_SECONDARY)
+
+        def toggle():
+            self._collapse_state[key] = not self._collapse_state.get(key, False)
+            self._rebuild_popover_content()
+
+        toggler = _ButtonAction.alloc().initWithCallback_(toggle)
+        btn.setTarget_(toggler)
+        btn.setAction_(objc.selector(toggler.perform_, signature=b'v@:@'))
+        self._action_refs.append(toggler)
+        return btn
+
+    def _build_detail_section(self, data, card_w, card_inner_w):
+        """Build the detail usage collapsible section."""
+        views = []
+        header = self._make_section_header("📊 세부 사용량", "detail", card_w)
+        views.append((header, 24))
+
+        if not self._collapse_state.get("detail", False):
+            return views
+
+        today = data["today_totals"]
+        sess = data["sess_totals"]
+        week = data["week_totals"]
+
+        lines = [
+            ("── 오늘 ──", True),
+            (f"  토큰 {fmt_tokens(today.get('total', 0))}  (입력 {fmt_tokens(today.get('input', 0))} / 출력 {fmt_tokens(today.get('output', 0))})", False),
+            (f"  비용 {fmt_cost(today.get('cost', 0))}  |  요청 {today.get('requests', 0)}회", False),
+            ("── 세션 (5시간) ──", True),
+            (f"  토큰 {fmt_tokens(sess.get('total', 0))}  (입력 {fmt_tokens(sess.get('input', 0))} / 출력 {fmt_tokens(sess.get('output', 0))})", False),
+        ]
+        if sess.get("cache_write", 0) or sess.get("cache_read", 0):
+            lines.append((f"  캐시 생성 {fmt_tokens(sess.get('cache_write', 0))} / 읽기 {fmt_tokens(sess.get('cache_read', 0))}", False))
+        lines.append((f"  비용 {fmt_cost(sess.get('cost', 0))}", False))
+        lines.extend([
+            ("── 이번 주 (7일) ──", True),
+            (f"  토큰 {fmt_tokens(week.get('total', 0))}  (입력 {fmt_tokens(week.get('input', 0))} / 출력 {fmt_tokens(week.get('output', 0))})", False),
+            (f"  비용 {fmt_cost(week.get('cost', 0))}  |  요청 {week.get('requests', 0)}회", False),
+        ])
+
+        card = self._build_text_card(lines, card_w, card_inner_w)
+        views.append((card, card.frame().size.height))
+        return views
+
+    def _build_model_section(self, data, card_w, card_inner_w):
+        """Build model breakdown collapsible section."""
+        views = []
+        week_models = data.get("week_models", {})
+        week_costs = data.get("week_costs", {})
+        if not week_models:
+            return views
+
+        header = self._make_section_header("🤖 모델별", "model", card_w)
+        views.append((header, 24))
+
+        if not self._collapse_state.get("model", False):
+            return views
+
+        lines = []
+        for m in sorted(week_costs, key=week_costs.get, reverse=True):
+            d = week_models[m]
+            total_t = sum(d.values())
+            short = m.split("/")[-1] if "/" in m else m
+            lines.append((f"  {short}: {fmt_tokens(total_t)}  {fmt_cost(week_costs[m])}", False))
+
+        card = self._build_text_card(lines, card_w, card_inner_w)
+        views.append((card, card.frame().size.height))
+        return views
+
+    def _build_history_section(self, data, card_w, card_inner_w):
+        """Build 7-day history with bar chart."""
+        views = []
+        daily = data.get("daily", [])
         costs = [c for _, c in daily]
-        spark = make_sparkline(costs)
         total_7d = sum(costs)
-        history_menu = rumps.MenuItem(f"📈 7일  {spark}  {fmt_cost(total_7d)}")
-        for date_str, cost in daily:
-            bar_len = 0
-            if max(costs) > 0:
-                bar_len = round(cost / max(costs) * 10)
-            bar = "█" * bar_len + "░" * (10 - bar_len)
-            history_menu.add(_make_label(
-                f"  {date_str}  {bar}  {fmt_cost(cost)}"
-            ))
-        self.menu.add(history_menu)
+        spark = make_sparkline(costs)
 
-        # ── Plan recommendation (submenu) ──
-        try:
-            rec = _recommend_plan(self.tracker, _api_cache)
-            rec_menu = rumps.MenuItem("💡 플랜 추천")
+        header = self._make_section_header(f"📈 7일  {spark}  {fmt_cost(total_7d)}", "history", card_w)
+        views.append((header, 24))
 
-            rec_menu.add(_make_label(f"  현재 플랜: {rec['current_plan']}"))
-            rec_menu.add(rumps.separator)
+        if not self._collapse_state.get("history", False):
+            return views
 
-            rec_menu.add(_make_label("── 사용량 분석 ──"))
-            rec_menu.add(_make_label(f"  30일 비용: {fmt_cost(rec['total_30d'])} ({rec['active_days']}일 활성)"))
-            rec_menu.add(_make_label(f"  피크 주간: {fmt_cost(rec['peak_week_cost'])}"))
-            if rec['opus_ratio'] > 0.01:
-                rec_menu.add(_make_label(f"  Opus 비중: {rec['opus_ratio']:.0%}"))
-            rec_menu.add(rumps.separator)
+        max_cost = max(costs) if costs else 1
+        bar_area_h = 60
+        label_h = 14
+        chart_h = bar_area_h + label_h + CARD_PADDING * 2
+        card = _build_card(chart_h)
 
-            rec_menu.add(_make_label("── 플랜별 비교 ──"))
-            for pf in rec['plan_fits']:
-                usage_pct = pf['usage_pct']
-                if usage_pct > 100:
-                    status = "🔴 초과"
-                elif usage_pct > 80:
-                    status = "🟡 빠듯"
-                else:
-                    status = "🟢 여유"
-                is_rec = " ⭐" if pf['name'] == rec['recommended'] else ""
-                is_cur = " (현재)" if pf['name'] == rec['current_plan'] else ""
-                rec_menu.add(_make_label(
-                    f"  {status}  {pf['name']} ${pf['price']}/월  — 한도의 {usage_pct:.0f}% 사용{is_rec}{is_cur}"
-                ))
-            rec_menu.add(rumps.separator)
+        num_bars = len(daily)
+        if num_bars > 0:
+            gap = 4
+            bar_w = (card_inner_w - gap * (num_bars - 1)) / num_bars
+            for i, (date_str, cost) in enumerate(daily):
+                ratio = cost / max_cost if max_cost > 0 else 0
+                color = _progress_color(ratio * 100)
+                x = CARD_PADDING + i * (bar_w + gap)
 
-            star = "⭐ " if rec['recommended'] != rec['current_plan'] else "✓ "
-            rec_menu.add(_make_label(
-                f"  {star}추천: {rec['recommended']} (${rec['rec_price']}/월)"
-            ))
-            for r in rec['reasons']:
-                rec_menu.add(_make_label(f"    → {r}"))
+                bar = HistoryBarView.alloc().initWithFrame_fillRatio_color_(
+                    NSMakeRect(x, CARD_PADDING + label_h, bar_w, bar_area_h),
+                    ratio, color
+                )
+                card.addSubview_(bar)
 
-            if rec['savings']:
-                rec_menu.add(_make_label(f"  💰 월 ${rec['savings']} 절약 가능"))
-            elif rec['recommended'] == rec['current_plan']:
-                rec_menu.add(_make_label("  ✅ 현재 플랜이 적합합니다"))
+                day_lbl = _make_text_field(date_str.split("/")[-1], font_size=8,
+                                            color=_TEXT_SECONDARY)
+                day_lbl.setAlignment_(AppKit.NSTextAlignmentCenter)
+                day_lbl.setFrame_(NSMakeRect(x, CARD_PADDING, bar_w, label_h))
+                card.addSubview_(day_lbl)
 
-            self.menu.add(rec_menu)
-        except Exception as e:
-            print(f"[PLAN] Recommendation error: {e}", flush=True)
+                bar.setToolTip_(f"{date_str}: {fmt_cost(cost)}")
+
+        views.append((card, card.frame().size.height))
+        return views
+
+    def _build_plan_section(self, data, card_w, card_inner_w):
+        """Build plan recommendation collapsible section."""
+        views = []
+        rec = data.get("rec")
+        if not rec:
+            return views
+
+        header = self._make_section_header("💡 플랜 추천", "plan", card_w)
+        views.append((header, 24))
+
+        if not self._collapse_state.get("plan", False):
+            return views
+
+        lines = [
+            (f"현재 플랜: {rec['current_plan']}", True),
+            (f"30일 비용: {fmt_cost(rec['total_30d'])} ({rec['active_days']}일 활성)", False),
+            (f"피크 주간: {fmt_cost(rec['peak_week_cost'])}", False),
+        ]
+        if rec['opus_ratio'] > 0.01:
+            lines.append((f"Opus 비중: {rec['opus_ratio']:.0%}", False))
+        lines.append(("", False))
+
+        for pf in rec['plan_fits']:
+            usage_pct = pf['usage_pct']
+            if usage_pct > 100:
+                status = "🔴"
+            elif usage_pct > 80:
+                status = "🟡"
+            else:
+                status = "🟢"
+            is_rec = " ⭐" if pf['name'] == rec['recommended'] else ""
+            is_cur = " ←" if pf['name'] == rec['current_plan'] else ""
+            lines.append((f"{status} {pf['name']} ${pf['price']}/월 — {usage_pct:.0f}%{is_rec}{is_cur}", False))
+
+        lines.append(("", False))
+        star = "⭐ " if rec['recommended'] != rec['current_plan'] else "✓ "
+        lines.append((f"{star}추천: {rec['recommended']} (${rec['rec_price']}/월)", True))
+        for r in rec['reasons']:
+            lines.append((f"  → {r}", False))
+        if rec['savings']:
+            lines.append((f"💰 월 ${rec['savings']} 절약 가능", False))
+        elif rec['recommended'] == rec['current_plan']:
+            lines.append(("✅ 현재 플랜이 적합합니다", False))
+
+        card = self._build_text_card(lines, card_w, card_inner_w)
+        views.append((card, card.frame().size.height))
+        return views
+
+    def _build_text_card(self, lines, card_w, card_inner_w):
+        """Build a card with multiple text lines. lines = [(text, is_bold), ...]"""
+        line_h = 15
+        total_h = len(lines) * line_h
+        card = _build_card(total_h)
+
+        y = total_h - line_h
+        for text, is_bold in lines:
+            if text:
+                tf = _make_text_field(text, font_size=11,
+                                       color=_TEXT_PRIMARY if is_bold else _TEXT_SECONDARY,
+                                       bold=is_bold)
+                tf.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, line_h))
+                card.addSubview_(tf)
+            y -= line_h
+
+        return card
+
+    def _build_update_card(self, new_ver, release_url, card_w, card_inner_w):
+        """Build update notification card."""
+        card_h = 44
+        card = _build_card(card_h)
+
+        lbl = _make_text_field(f"⬆️ {new_ver} 업데이트 가능", font_size=11, color=_GREEN, bold=True)
+        lbl.setFrame_(NSMakeRect(CARD_PADDING, CARD_PADDING + 22, card_inner_w, 16))
+        card.addSubview_(lbl)
+
+        btn = HoverButton.alloc().initWithFrame_(NSMakeRect(CARD_PADDING, CARD_PADDING + 2, 80, 18))
+        btn.setTitle_("업데이트")
+        btn.setFont_(AppKit.NSFont.systemFontOfSize_(10))
+        btn.setBordered_(False)
+        btn.setContentTintColor_(_GREEN)
+        updater = _ButtonAction.alloc().initWithCallback_(lambda v=new_ver: _auto_update(v))
+        btn.setTarget_(updater)
+        btn.setAction_(objc.selector(updater.perform_, signature=b'v@:@'))
+        self._action_refs.append(updater)
+        card.addSubview_(btn)
+
+        notes_btn = HoverButton.alloc().initWithFrame_(NSMakeRect(CARD_PADDING + 90, CARD_PADDING + 2, 80, 18))
+        notes_btn.setTitle_("릴리즈 노트")
+        notes_btn.setFont_(AppKit.NSFont.systemFontOfSize_(10))
+        notes_btn.setBordered_(False)
+        notes_btn.setContentTintColor_(_TEXT_SECONDARY)
+        opener = _ButtonAction.alloc().initWithCallback_(lambda: _open_url(release_url))
+        notes_btn.setTarget_(opener)
+        notes_btn.setAction_(objc.selector(opener.perform_, signature=b'v@:@'))
+        self._action_refs.append(opener)
+        card.addSubview_(notes_btn)
+
+        return card
+
+    def _build_settings_views(self, data, card_w, card_inner_w):
+        """Build inline settings panel views."""
+        views = []
+        config = data["config"]
+        line_h = 22
+
+        settings_lines = []
+        title_mode = config.get("title_display", "session")
+
+        for mode, label in [("session", "타이틀: 세션"), ("week", "타이틀: 주간"), ("both", "타이틀: 둘 다")]:
+            check = "✓ " if title_mode == mode else "   "
+            settings_lines.append((f"{check}{label}", mode, "title"))
+
+        settings_lines.append(None)
+
+        for key, label in [("show_session", "세션 표시"), ("show_week", "주간 표시"),
+                           ("show_sonnet", "소넷 표시")]:
+            check = "✓ " if config.get(key, True) else "   "
+            settings_lines.append((f"{check}{label}", key, "toggle"))
+
+        settings_lines.append(None)
+        alert_on = config.get("alert_enabled", True)
+        settings_lines.append((f"{'✓ ' if alert_on else '   '}사용량 알림 (80%/90%)", "alert_enabled", "toggle"))
+
+        total_h = len(settings_lines) * line_h
+        card = _build_card(total_h)
+
+        y = total_h - line_h
+        for item in settings_lines:
+            if item is None:
+                sep = AppKit.NSView.alloc().initWithFrame_(
+                    NSMakeRect(CARD_PADDING, y + CARD_PADDING + line_h // 2, card_inner_w, 1)
+                )
+                sep.setWantsLayer_(True)
+                sep.layer().setBackgroundColor_(_SEPARATOR_COLOR.CGColor())
+                card.addSubview_(sep)
+                y -= line_h
+                continue
+
+            text, key, kind = item
+            btn = HoverButton.alloc().initWithFrame_(
+                NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, line_h)
+            )
+            btn.setTitle_(text)
+            btn.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+            btn.setAlignment_(AppKit.NSTextAlignmentLeft)
+            btn.setBordered_(False)
+            btn.setContentTintColor_(_TEXT_PRIMARY)
+
+            if kind == "title":
+                action = _ButtonAction.alloc().initWithCallback_(
+                    lambda m=key: self._set_title_display(m)
+                )
+            else:
+                action = _ButtonAction.alloc().initWithCallback_(
+                    lambda k=key: self._toggle_config(k)
+                )
+            btn.setTarget_(action)
+            btn.setAction_(objc.selector(action.perform_, signature=b'v@:@'))
+            self._action_refs.append(action)
+            card.addSubview_(btn)
+            y -= line_h
+
+        views.append((card, card.frame().size.height))
+        return views
+
+    def _build_footer(self, card_w):
+        """Build footer with refresh, settings, version, quit buttons."""
+        footer_h = 28
+        footer = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, card_w, footer_h))
+
+        btn_w = card_w / 4.0
+        buttons = [
+            ("🔄", self._on_refresh_click),
+            ("⚙️", self._on_settings_click),
+            (f"v{APP_VERSION}", None),
+            ("종료", self._on_quit_click),
+        ]
+
+        for i, (title, callback) in enumerate(buttons):
+            btn = HoverButton.alloc().initWithFrame_(
+                NSMakeRect(i * btn_w, 0, btn_w, footer_h)
+            )
+            btn.setTitle_(title)
+            btn.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+            btn.setBordered_(False)
+            btn.setContentTintColor_(_TEXT_SECONDARY)
+
+            if callback:
+                action = _ButtonAction.alloc().initWithCallback_(callback)
+                btn.setTarget_(action)
+                btn.setAction_(objc.selector(action.perform_, signature=b'v@:@'))
+                self._action_refs.append(action)
+
+            footer.addSubview_(btn)
+
+        return footer
+
+    def _on_refresh_click(self):
+        self._rebuild(force_api=True)
+        self._rebuild_popover_content()
+
+    def _on_settings_click(self):
+        self._settings_visible = not self._settings_visible
+        self._rebuild_popover_content()
+
+    def _on_quit_click(self):
+        if self._popover and self._popover.isShown():
+            self._popover.close()
+        rumps.quit_application()
 
     # ── threshold alerts ─────────────────────────────────────────────────
 
     def _check_alerts(self, sess_pct, sess_reset, week_pct, week_reset):
-        """Send macOS notification when usage crosses a threshold.
-        Each threshold fires only once per reset cycle.
-        """
+        """Send macOS notification when usage crosses a threshold."""
         config = _load_config()
         if not config.get("alert_enabled", True):
             return
@@ -1399,18 +2018,15 @@ class ClaudeUsageApp(rumps.App):
             ("week", "주간(7d)", week_pct, week_reset),
         ]
         for key, label, pct, reset_time in checks:
-            # Detect reset cycle change → clear previous alerts
             if reset_time != self._last_reset[key]:
                 self._alerted[key] = set()
                 self._last_reset[key] = reset_time
 
-            # Find the highest un-notified threshold that has been crossed
             fired = None
             for threshold in ALERT_THRESHOLDS:
                 if pct >= threshold and threshold not in self._alerted[key]:
                     fired = threshold
             if fired is not None:
-                # Mark all thresholds up to the fired one as alerted
                 for threshold in ALERT_THRESHOLDS:
                     if threshold <= fired:
                         self._alerted[key].add(threshold)
@@ -1421,72 +2037,34 @@ class ClaudeUsageApp(rumps.App):
                 )
                 print(f"[ALERT] {label} {pct:.0f}% >= {fired}%", flush=True)
 
-    # ── settings menu ────────────────────────────────────────────────────
-
-    def _add_settings_menu(self):
-        """Build the ⚙️ 표시 설정 submenu."""
-        config = _load_config()
-        settings = rumps.MenuItem("⚙️ 표시 설정")
-
-        title_mode = config.get("title_display", "session")
-
-        # Title display options (radio-style with check marks)
-        opt_session = rumps.MenuItem(
-            f"{'✓ ' if title_mode == 'session' else '   '}타이틀: 세션",
-            callback=lambda _: self._set_title_display("session"),
-        )
-        opt_week = rumps.MenuItem(
-            f"{'✓ ' if title_mode == 'week' else '   '}타이틀: 주간",
-            callback=lambda _: self._set_title_display("week"),
-        )
-        opt_both = rumps.MenuItem(
-            f"{'✓ ' if title_mode == 'both' else '   '}타이틀: 둘 다",
-            callback=lambda _: self._set_title_display("both"),
-        )
-        settings.add(opt_session)
-        settings.add(opt_week)
-        settings.add(opt_both)
-        settings.add(rumps.separator)
-
-        # Dropdown section toggles
-        show_sess = config.get("show_session", True)
-        show_week = config.get("show_week", True)
-        show_sonnet = config.get("show_sonnet", True)
-
-        settings.add(rumps.MenuItem(
-            f"{'✓ ' if show_sess else '   '}세션 표시",
-            callback=lambda _: self._toggle_config("show_session"),
-        ))
-        settings.add(rumps.MenuItem(
-            f"{'✓ ' if show_week else '   '}주간 표시",
-            callback=lambda _: self._toggle_config("show_week"),
-        ))
-        settings.add(rumps.MenuItem(
-            f"{'✓ ' if show_sonnet else '   '}소넷 표시",
-            callback=lambda _: self._toggle_config("show_sonnet"),
-        ))
-        settings.add(rumps.separator)
-
-        # Alert toggle
-        alert_on = config.get("alert_enabled", True)
-        settings.add(rumps.MenuItem(
-            f"{'✓ ' if alert_on else '   '}사용량 알림 (80%/90%)",
-            callback=lambda _: self._toggle_config("alert_enabled"),
-        ))
-
-        self.menu.add(settings)
+    # ── settings callbacks ───────────────────────────────────────────────
 
     def _set_title_display(self, mode):
         config = _load_config()
         config["title_display"] = mode
         _save_config(config)
-        self._rebuild()
+        # Update cached config and title bar without re-fetching data
+        if self._cached_data:
+            self._cached_data["config"] = config
+            stale_mark = "~" if (self._cached_data.get("api_stale") or not self._cached_data.get("api_ok")) else ""
+            sess_pct = self._cached_data.get("sess_pct", 0)
+            week_pct = self._cached_data.get("week_pct", 0)
+            if mode == "week":
+                self.title = f"⚡ {stale_mark}{week_pct:.0f}%"
+            elif mode == "both":
+                self.title = f"⚡ {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
+            else:
+                self.title = f"⚡ {stale_mark}{sess_pct:.0f}%"
+        self._rebuild_popover_content()
 
     def _toggle_config(self, key):
         config = _load_config()
         config[key] = not config.get(key, True)
         _save_config(config)
-        self._rebuild()
+        # Update cached config without re-fetching data
+        if self._cached_data:
+            self._cached_data["config"] = config
+        self._rebuild_popover_content()
 
     # ── callbacks ───────────────────────────────────────────────────────
 
@@ -1495,8 +2073,6 @@ class ClaudeUsageApp(rumps.App):
 
     def _on_tick(self, _=None):
         try:
-            # Detect wake-from-sleep via elapsed time gap
-            # If more time passed than 2x the refresh interval, we likely slept
             now = time.time()
             last = getattr(self, "_last_active_time", now)
             self._last_active_time = now

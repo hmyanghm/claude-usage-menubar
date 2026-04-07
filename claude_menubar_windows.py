@@ -902,7 +902,7 @@ def _send_notification(title, message):
 # ─── Floating Widget ─────────────────────────────────────────────────────────
 
 class FloatingWidget:
-    """Always-on-top translucent overlay showing usage at a glance."""
+    """Always-on-top slim bar showing usage at a glance, like a macOS menubar."""
 
     BG = "#1E1E2E"
     FG = "#CDD6F4"
@@ -917,29 +917,36 @@ class FloatingWidget:
         self._root.withdraw()  # hide until first update
         self._root.overrideredirect(True)  # no title bar
         self._root.attributes("-topmost", True)
-        self._root.attributes("-alpha", 0.88)
+        self._root.attributes("-alpha", 0.92)
         self._root.configure(bg=self.BG)
 
-        # Container frame with rounded-corner look
-        self._frame = tk.Frame(self._root, bg=self.BG, padx=10, pady=5)
+        # Single-row horizontal bar
+        self._frame = tk.Frame(self._root, bg=self.BG, padx=6, pady=2)
         self._frame.pack()
 
-        # Labels: Session / Week / Sonnet — one row each
+        # App icon label
+        icon_lbl = tk.Label(self._frame, text="\u2601", font=("Segoe UI", 10),
+                            fg="#89B4FA", bg=self.BG)
+        icon_lbl.pack(side="left", padx=(0, 4))
+
+        # Inline labels packed horizontally
         self._labels = {}
         for key in ("session", "week", "sonnet"):
-            lbl = tk.Label(self._frame, text="", font=("Segoe UI", 10),
-                           fg=self.FG, bg=self.BG, anchor="w")
-            lbl.pack(anchor="w")
+            lbl = tk.Label(self._frame, text="", font=("Segoe UI", 9),
+                           fg=self.FG, bg=self.BG)
+            lbl.pack(side="left", padx=(0, 2))
             self._labels[key] = lbl
 
         # Drag support
         self._drag_data = {"x": 0, "y": 0}
-        self._root.bind("<ButtonPress-1>", self._on_drag_start)
-        self._root.bind("<B1-Motion>", self._on_drag_move)
-        self._root.bind("<ButtonRelease-1>", self._on_drag_end)
+        for widget in [self._root, self._frame, icon_lbl]:
+            widget.bind("<ButtonPress-1>", self._on_drag_start)
+            widget.bind("<B1-Motion>", self._on_drag_move)
+            widget.bind("<ButtonRelease-1>", self._on_drag_end)
 
         # Right-click to hide
         self._root.bind("<Button-3>", self._on_right_click)
+        self._frame.bind("<Button-3>", self._on_right_click)
 
         # Restore saved position
         config = _load_config()
@@ -948,10 +955,8 @@ class FloatingWidget:
         if wx is not None and wy is not None:
             self._root.geometry(f"+{wx}+{wy}")
         else:
-            # Default: top-right corner
-            self._root.update_idletasks()
-            sw = self._root.winfo_screenwidth()
-            self._root.geometry(f"+{sw - 280}+10")
+            # Default: top-left corner
+            self._root.geometry("+8+4")
 
         self._visible = config.get("show_widget", True)
 
@@ -964,11 +969,6 @@ class FloatingWidget:
             return self.YELLOW
         return self.GREEN
 
-    def _mini_bar(self, pct, width=10):
-        pct = max(0, min(100, pct))
-        filled = round(width * pct / 100)
-        return "\u2588" * filled + "\u2591" * (width - filled)
-
     def _on_drag_start(self, event):
         self._drag_data["x"] = event.x
         self._drag_data["y"] = event.y
@@ -979,7 +979,6 @@ class FloatingWidget:
         self._root.geometry(f"+{x}+{y}")
 
     def _on_drag_end(self, event):
-        # Save position to config
         config = _load_config()
         config["widget_x"] = self._root.winfo_x()
         config["widget_y"] = self._root.winfo_y()
@@ -998,36 +997,33 @@ class FloatingWidget:
 
         config = data.get("config", {})
         api_ok = data.get("api_ok", False)
-        est = "" if api_ok else "~"
+        est = "~" if not api_ok else ""
 
         sess_pct = data.get("sess_pct", 0)
         week_pct = data.get("week_pct", 0)
         sonnet_pct = data.get("sonnet_pct")
 
         if config.get("show_session", True):
-            bar = self._mini_bar(sess_pct)
             self._labels["session"].config(
-                text=f"5h      {bar}  {est}{sess_pct:.0f}%",
+                text=f"5h:{est}{sess_pct:.0f}%",
                 fg=self._color_for_pct(sess_pct))
-            self._labels["session"].pack(anchor="w")
+            self._labels["session"].pack(side="left", padx=(0, 6))
         else:
             self._labels["session"].pack_forget()
 
         if config.get("show_week", True):
-            bar = self._mini_bar(week_pct)
             self._labels["week"].config(
-                text=f"7d      {bar}  {est}{week_pct:.0f}%",
+                text=f"7d:{est}{week_pct:.0f}%",
                 fg=self._color_for_pct(week_pct))
-            self._labels["week"].pack(anchor="w")
+            self._labels["week"].pack(side="left", padx=(0, 6))
         else:
             self._labels["week"].pack_forget()
 
         if config.get("show_sonnet", True) and sonnet_pct is not None:
-            bar = self._mini_bar(sonnet_pct)
             self._labels["sonnet"].config(
-                text=f"Sonnet  {bar}  {sonnet_pct:.0f}%",
+                text=f"Sonnet:{sonnet_pct:.0f}%",
                 fg=self._color_for_pct(sonnet_pct))
-            self._labels["sonnet"].pack(anchor="w")
+            self._labels["sonnet"].pack(side="left", padx=(0, 2))
         else:
             self._labels["sonnet"].pack_forget()
 

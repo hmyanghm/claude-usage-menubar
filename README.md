@@ -166,9 +166,3 @@ OAuth 토큰을 `~/.claude/.credentials.json` 파일에서 우선 읽고, 없으
 3. 두 곳 모두 토큰이 없으면 [이슈](https://github.com/hmyanghm/claude-usage-menubar/issues)에 알려주세요.
 
 </details>
-
----
-
-## 라이선스
-
-MIT

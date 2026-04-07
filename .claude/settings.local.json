@@ -80,7 +80,9 @@
       "Bash(git push:*)",
       "Bash(gh release:*)",
       "Bash(sudo xcodebuild:*)",
-      "Bash(xcodebuild -version)"
+      "Bash(xcodebuild -version)",
+      "Bash(git rebase:*)",
+      "Bash(GIT_EDITOR=true git rebase --continue)"
     ]
   }
 }

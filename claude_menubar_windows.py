@@ -26,6 +26,8 @@ from collections import defaultdict
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
+import tkinter as tk
+
 import pystray
 from PIL import Image, ImageDraw, ImageFont
 
@@ -50,6 +52,9 @@ DEFAULT_CONFIG = {
     "show_week": True,
     "show_sonnet": True,
     "alert_enabled": True,
+    "show_widget": True,
+    "widget_x": None,
+    "widget_y": None,
 }
 
 ALERT_THRESHOLDS = [80, 90]
@@ -894,6 +899,171 @@ def _send_notification(title, message):
         print(f"[ALERT] Notification failed: {e}", flush=True)
 
 
+# ─── Floating Widget ─────────────────────────────────────────────────────────
+
+class FloatingWidget:
+    """Always-on-top translucent overlay showing usage at a glance."""
+
+    BG = "#1E1E2E"
+    FG = "#CDD6F4"
+    GREEN = "#A6E3A1"
+    YELLOW = "#F9E2AF"
+    ORANGE = "#FAB387"
+    RED = "#F38BA8"
+    DIM = "#6C7086"
+
+    def __init__(self):
+        self._root = tk.Tk()
+        self._root.withdraw()  # hide until first update
+        self._root.overrideredirect(True)  # no title bar
+        self._root.attributes("-topmost", True)
+        self._root.attributes("-alpha", 0.88)
+        self._root.configure(bg=self.BG)
+
+        # Container frame with rounded-corner look
+        self._frame = tk.Frame(self._root, bg=self.BG, padx=10, pady=5)
+        self._frame.pack()
+
+        # Labels: Session / Week / Sonnet — one row each
+        self._labels = {}
+        for key in ("session", "week", "sonnet"):
+            lbl = tk.Label(self._frame, text="", font=("Segoe UI", 10),
+                           fg=self.FG, bg=self.BG, anchor="w")
+            lbl.pack(anchor="w")
+            self._labels[key] = lbl
+
+        # Drag support
+        self._drag_data = {"x": 0, "y": 0}
+        self._root.bind("<ButtonPress-1>", self._on_drag_start)
+        self._root.bind("<B1-Motion>", self._on_drag_move)
+        self._root.bind("<ButtonRelease-1>", self._on_drag_end)
+
+        # Right-click to hide
+        self._root.bind("<Button-3>", self._on_right_click)
+
+        # Restore saved position
+        config = _load_config()
+        wx = config.get("widget_x")
+        wy = config.get("widget_y")
+        if wx is not None and wy is not None:
+            self._root.geometry(f"+{wx}+{wy}")
+        else:
+            # Default: top-right corner
+            self._root.update_idletasks()
+            sw = self._root.winfo_screenwidth()
+            self._root.geometry(f"+{sw - 280}+10")
+
+        self._visible = config.get("show_widget", True)
+
+    def _color_for_pct(self, pct):
+        if pct >= 90:
+            return self.RED
+        if pct >= 70:
+            return self.ORANGE
+        if pct >= 50:
+            return self.YELLOW
+        return self.GREEN
+
+    def _mini_bar(self, pct, width=10):
+        pct = max(0, min(100, pct))
+        filled = round(width * pct / 100)
+        return "\u2588" * filled + "\u2591" * (width - filled)
+
+    def _on_drag_start(self, event):
+        self._drag_data["x"] = event.x
+        self._drag_data["y"] = event.y
+
+    def _on_drag_move(self, event):
+        x = self._root.winfo_x() + event.x - self._drag_data["x"]
+        y = self._root.winfo_y() + event.y - self._drag_data["y"]
+        self._root.geometry(f"+{x}+{y}")
+
+    def _on_drag_end(self, event):
+        # Save position to config
+        config = _load_config()
+        config["widget_x"] = self._root.winfo_x()
+        config["widget_y"] = self._root.winfo_y()
+        _save_config(config)
+
+    def _on_right_click(self, event):
+        self.hide()
+        config = _load_config()
+        config["show_widget"] = False
+        _save_config(config)
+
+    def update(self, data):
+        """Update widget labels from usage data. Must be called from tk thread."""
+        if not data:
+            return
+
+        config = data.get("config", {})
+        api_ok = data.get("api_ok", False)
+        est = "" if api_ok else "~"
+
+        sess_pct = data.get("sess_pct", 0)
+        week_pct = data.get("week_pct", 0)
+        sonnet_pct = data.get("sonnet_pct")
+
+        if config.get("show_session", True):
+            bar = self._mini_bar(sess_pct)
+            self._labels["session"].config(
+                text=f"S  {bar}  {est}{sess_pct:.0f}%",
+                fg=self._color_for_pct(sess_pct))
+            self._labels["session"].pack(anchor="w")
+        else:
+            self._labels["session"].pack_forget()
+
+        if config.get("show_week", True):
+            bar = self._mini_bar(week_pct)
+            self._labels["week"].config(
+                text=f"W  {bar}  {est}{week_pct:.0f}%",
+                fg=self._color_for_pct(week_pct))
+            self._labels["week"].pack(anchor="w")
+        else:
+            self._labels["week"].pack_forget()
+
+        if config.get("show_sonnet", True) and sonnet_pct is not None:
+            bar = self._mini_bar(sonnet_pct)
+            self._labels["sonnet"].config(
+                text=f"So {bar}  {sonnet_pct:.0f}%",
+                fg=self._color_for_pct(sonnet_pct))
+            self._labels["sonnet"].pack(anchor="w")
+        else:
+            self._labels["sonnet"].pack_forget()
+
+    def show(self):
+        self._visible = True
+        self._root.deiconify()
+
+    def hide(self):
+        self._visible = False
+        self._root.withdraw()
+
+    @property
+    def visible(self):
+        return self._visible
+
+    def schedule(self, func, *args):
+        """Thread-safe way to run something on the tk main loop."""
+        try:
+            self._root.after(0, func, *args)
+        except Exception:
+            pass
+
+    def mainloop(self):
+        """Start the tk event loop (blocks)."""
+        if self._visible:
+            self._root.deiconify()
+        self._root.mainloop()
+
+    def quit(self):
+        try:
+            self._root.quit()
+            self._root.destroy()
+        except Exception:
+            pass
+
+
 # ─── Tray Icon ───────────────────────────────────────────────────────────────
 
 def _create_icon_image(text="--", color="#4A90D9"):
@@ -938,6 +1108,7 @@ class ClaudeUsageTray:
         self._running = True
         self._icon = None
         self._last_data = {}
+        self._widget = None
 
     def _get_usage_data(self, force_api=False):
         """Gather all usage data for menu building."""
@@ -1215,6 +1386,10 @@ class ClaudeUsageTray:
             pystray.MenuItem("Alerts (80%/90%)",
                              lambda: self._toggle_config("alert_enabled"),
                              checked=lambda _: _load_config().get("alert_enabled", True)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Floating Widget",
+                             lambda: self._toggle_widget(),
+                             checked=lambda _: _load_config().get("show_widget", True)),
         ]
         items.append(pystray.MenuItem("Settings", pystray.Menu(*settings_items)))
 
@@ -1278,6 +1453,10 @@ class ClaudeUsageTray:
             self._icon.title = tooltip
             self._icon.menu = self._build_menu(data)
 
+        # Update floating widget
+        if self._widget:
+            self._widget.schedule(self._widget.update, data)
+
     def _on_refresh(self, *args):
         """Manual refresh callback."""
         threading.Thread(target=self._refresh_thread, args=(True,), daemon=True).start()
@@ -1291,6 +1470,8 @@ class ClaudeUsageTray:
 
     def _on_quit(self, *args):
         self._running = False
+        if self._widget:
+            self._widget.schedule(self._widget.quit)
         if self._icon:
             self._icon.stop()
 
@@ -1305,6 +1486,18 @@ class ClaudeUsageTray:
         config[key] = not config.get(key, True)
         _save_config(config)
         self._refresh_thread()
+
+    def _toggle_widget(self):
+        config = _load_config()
+        new_val = not config.get("show_widget", True)
+        config["show_widget"] = new_val
+        _save_config(config)
+        if self._widget:
+            if new_val:
+                self._widget.schedule(self._widget.show)
+                self._widget.schedule(self._widget.update, self._last_data)
+            else:
+                self._widget.schedule(self._widget.hide)
 
     def _auto_refresh_loop(self):
         """Background thread that refreshes data periodically."""
@@ -1364,12 +1557,21 @@ class ClaudeUsageTray:
             menu=self._build_menu(data),
         )
 
+        # Create floating widget
+        self._widget = FloatingWidget()
+        self._widget.update(data)
+
         # Start auto-refresh thread
         refresh_thread = threading.Thread(target=self._auto_refresh_loop, daemon=True)
         refresh_thread.start()
 
+        # Run tray icon in background thread (pystray supports this)
         print("[DEBUG] Starting tray icon...", flush=True)
-        self._icon.run()
+        tray_thread = threading.Thread(target=self._icon.run, daemon=True)
+        tray_thread.start()
+
+        # Run tkinter mainloop on main thread (required by Windows)
+        self._widget.mainloop()
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────

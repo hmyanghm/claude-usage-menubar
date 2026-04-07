@@ -6,7 +6,7 @@
 ![macOS](https://img.shields.io/badge/macOS-menu%20bar-blue) ![Windows](https://img.shields.io/badge/Windows-system%20tray-0078D6) ![version](https://img.shields.io/badge/version-1.1.0-green)
 
 <p align="center">
-  <img src="screenshots/main.png" alt="Claude Usage Monitor" width="400">
+  <img src="screenshots/main-v2.png" alt="Claude Usage Monitor" width="400">
 </p>
 
 ---

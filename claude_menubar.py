@@ -1396,22 +1396,51 @@ class ClaudeUsageApp(rumps.App):
         self._refresh_timer = rumps.Timer(self._on_tick, REFRESH_INTERVAL_SEC)
         self._refresh_timer.start()
 
+    def _close_popover(self):
+        """Close popover and remove event monitor."""
+        if self._popover and self._popover.isShown():
+            self._popover.close()
+        if getattr(self, '_event_monitor', None):
+            AppKit.NSEvent.removeMonitor_(self._event_monitor)
+            self._event_monitor = None
+
     def toggle_popover(self, sender):
         """Toggle the NSPopover open/closed."""
         if not self._popover:
             return
         if self._popover.isShown():
-            self._popover.close()
+            self._close_popover()
         else:
-            # Refresh data when opening popover
-            try:
-                self._cached_data = self._gather_data()
-            except Exception as e:
-                print(f"[POPOVER] Data gather error: {e}", flush=True)
+            # Show immediately with cached data, then refresh in background
             self._rebuild_popover_content()
             button = self._nsapp.nsstatusitem.button()
             self._popover.showRelativeToRect_ofView_preferredEdge_(
                 button.bounds(), button, AppKit.NSMinYEdge
+            )
+            # Background data refresh
+            import threading
+            def _bg_refresh():
+                try:
+                    new_data = self._gather_data()
+                    # Update on main thread
+                    from PyObjCTools import AppHelper
+                    def _update():
+                        self._cached_data = new_data
+                        if self._popover and self._popover.isShown():
+                            self._rebuild_popover_content()
+                    AppHelper.callAfter(_update)
+                except Exception as e:
+                    print(f"[POPOVER] Background refresh error: {e}", flush=True)
+            threading.Thread(target=_bg_refresh, daemon=True).start()
+            # Add global event monitor to close on outside click
+            if getattr(self, '_event_monitor', None):
+                AppKit.NSEvent.removeMonitor_(self._event_monitor)
+            mask = (AppKit.NSEventMaskLeftMouseDown | AppKit.NSEventMaskRightMouseDown)
+            def _on_global_click(event):
+                self._close_popover()
+                return event
+            self._event_monitor = AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                mask, _on_global_click
             )
 
     def _register_wake_observer(self):

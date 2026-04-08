@@ -902,6 +902,52 @@ def _send_notification(title, message):
 
 # ─── Floating Widget ─────────────────────────────────────────────────────────
 
+def _create_runner_tk_frames(height=20):
+    """Create runner animation frames as PhotoImage-compatible PIL images for tk Canvas."""
+    # Scale from SVG 16x22 to widget icon size
+    aspect = 16.0 / 22.0
+    w = int(height * aspect)
+    h = height
+    sx = w / 16.0
+    sy = h / 22.0
+    frames = []
+    for fd in _RUNNER_FRAMES_DATA_WIN:
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        fg = (192, 202, 245, 255)       # FG color #C0CAF5
+        fg_dim = (192, 202, 245, 97)    # 38% opacity
+
+        # Head
+        cx, cy, r = fd["head"]
+        draw.ellipse([
+            (cx - r) * sx, cy * sy - r * sy,
+            (cx + r) * sx, cy * sy + r * sy
+        ], fill=fg)
+
+        # Body
+        x1, y1, x2, y2 = fd["body"]
+        draw.line([(x1 * sx, y1 * sy), (x2 * sx, y2 * sy)],
+                  fill=fg, width=max(1, int(1.8 * sx)))
+
+        # Arms
+        for key, color in [("arm_near", fg), ("arm_far", fg_dim)]:
+            x1, y1, x2, y2 = fd[key]
+            draw.line([(x1 * sx, y1 * sy), (x2 * sx, y2 * sy)],
+                      fill=color, width=max(1, int(1.5 * sx)))
+
+        # Legs
+        for key, color in [("leg_near", fg), ("leg_far", fg_dim)]:
+            pts = fd[key]
+            scaled = [(p[0] * sx, p[1] * sy) for p in pts]
+            for j in range(len(scaled) - 1):
+                draw.line([scaled[j], scaled[j + 1]],
+                          fill=color, width=max(1, int(1.9 * sx)))
+
+        frames.append(img)
+    return frames
+
+
 class FloatingWidget:
     """Always-on-top slim bar showing usage at a glance, like a macOS menubar."""
 
@@ -938,6 +984,14 @@ class FloatingWidget:
         self._bar_items = {}
         self._sep_items = {}
         self._built = False
+
+        # Runner animation
+        self._runner_pil_frames = _create_runner_tk_frames(height=20)
+        self._runner_tk_frames = []  # PhotoImage refs (created after mainloop)
+        self._runner_index = 0
+        self._runner_icon_id = None
+        self._runner_anim_interval = 820  # ms
+        self._runner_after_id = None
 
         # Drag support
         self._drag_data = {"x": 0, "y": 0}
@@ -1015,9 +1069,14 @@ class FloatingWidget:
         self._round_rect(c, 0, 0, total_w, total_h, 6,
                          fill=self.BG_INNER, outline=self.BORDER, width=1)
 
-        # Cloud icon
-        c.create_text(pad_left + 7, total_h // 2, text="\u2601",
-                      font=("Segoe UI", 10), fill=self.ACCENT, anchor="center")
+        # Runner animation icon
+        from PIL import ImageTk
+        self._runner_tk_frames = [ImageTk.PhotoImage(f) for f in self._runner_pil_frames]
+        self._runner_icon_id = c.create_image(
+            pad_left + 7, total_h // 2,
+            image=self._runner_tk_frames[0], anchor="center"
+        )
+        self._start_runner_anim()
 
         cx = pad_left + icon_w + gap
 
@@ -1111,6 +1170,32 @@ class FloatingWidget:
         config["show_widget"] = False
         _save_config(config)
 
+    def _start_runner_anim(self):
+        """Start the runner animation loop on the widget."""
+        if self._runner_after_id:
+            self._root.after_cancel(self._runner_after_id)
+        config = _load_config()
+        if not config.get("animation_enabled", True):
+            return
+        self._runner_after_id = self._root.after(
+            self._runner_anim_interval, self._runner_tick)
+
+    def _runner_tick(self):
+        """Advance to next runner frame."""
+        if not self._runner_tk_frames or not self._runner_icon_id:
+            return
+        self._runner_index = (self._runner_index + 1) % len(self._runner_tk_frames)
+        self._canvas.itemconfigure(
+            self._runner_icon_id, image=self._runner_tk_frames[self._runner_index])
+        config = _load_config()
+        if config.get("animation_enabled", True):
+            self._runner_after_id = self._root.after(
+                self._runner_anim_interval, self._runner_tick)
+
+    def update_anim_speed(self, pct):
+        """Update runner animation speed from usage percentage."""
+        self._runner_anim_interval = int(_anim_interval_for_pct(pct) * 1000)
+
     def update(self, data):
         """Update widget from usage data. Must be called from tk thread."""
         if not data:
@@ -1119,6 +1204,9 @@ class FloatingWidget:
         if not self._built:
             self._build(data)
         self._update_bars(data)
+        # Update animation speed
+        sess_pct = data.get("sess_pct", 0)
+        self.update_anim_speed(sess_pct)
 
     def show(self):
         self._visible = True
@@ -1191,50 +1279,6 @@ _RUNNER_FRAMES_DATA_WIN = [
 ]
 
 
-def _create_runner_frames_pil(size=64):
-    """Create 4 PIL Image frames of a running stick figure for tray animation."""
-    # Scale from SVG viewBox (16x22) to icon size
-    sx = size / 16.0
-    sy = size / 22.0
-    frames = []
-    for fd in _RUNNER_FRAMES_DATA_WIN:
-        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        # Offset to center vertically
-        oy = (size - 22 * sy) / 2
-
-        fg = (255, 255, 255, 255)
-        fg_dim = (255, 255, 255, 97)  # 38%
-
-        # Head
-        cx, cy, r = fd["head"]
-        draw.ellipse([
-            (cx - r) * sx, cy * sy - r * sy + oy,
-            (cx + r) * sx, cy * sy + r * sy + oy
-        ], fill=fg)
-
-        # Body
-        x1, y1, x2, y2 = fd["body"]
-        draw.line([(x1 * sx, y1 * sy + oy), (x2 * sx, y2 * sy + oy)],
-                  fill=fg, width=max(1, int(1.8 * sx)))
-
-        # Arms
-        for key, color in [("arm_near", fg), ("arm_far", fg_dim)]:
-            x1, y1, x2, y2 = fd[key]
-            draw.line([(x1 * sx, y1 * sy + oy), (x2 * sx, y2 * sy + oy)],
-                      fill=color, width=max(1, int(1.5 * sx)))
-
-        # Legs
-        for key, color in [("leg_near", fg), ("leg_far", fg_dim)]:
-            pts = fd[key]
-            scaled = [(p[0] * sx, p[1] * sy + oy) for p in pts]
-            for j in range(len(scaled) - 1):
-                draw.line([scaled[j], scaled[j + 1]],
-                          fill=color, width=max(1, int(1.9 * sx)))
-
-        frames.append(img)
-    return frames
-
 
 def _anim_interval_for_pct(pct):
     """Map usage percentage to animation frame interval (seconds).
@@ -1286,11 +1330,6 @@ class ClaudeUsageTray:
         self._icon = None
         self._last_data = {}
         self._widget = None
-        # Animation state
-        self._anim_frames = _create_runner_frames_pil()
-        self._anim_index = 0
-        self._anim_timer = None
-        self._anim_interval = 0.82
 
     def _get_usage_data(self, force_api=False):
         """Gather all usage data for menu building."""
@@ -1601,47 +1640,6 @@ class ClaudeUsageTray:
         else:
             return "#4A90D9"  # blue
 
-    # ── animation ───────────────────────────────────────────────────────
-
-    def _start_animation(self):
-        """Start or restart the pulse animation."""
-        self._stop_animation()
-        config = _load_config()
-        if not config.get("animation_enabled", True):
-            return
-        self._anim_timer = threading.Timer(self._anim_interval, self._anim_tick)
-        self._anim_timer.daemon = True
-        self._anim_timer.start()
-
-    def _stop_animation(self):
-        """Stop the animation timer."""
-        if self._anim_timer:
-            self._anim_timer.cancel()
-            self._anim_timer = None
-
-    def _anim_tick(self):
-        """Advance to the next animation frame and schedule next tick."""
-        if not self._running:
-            return
-        try:
-            self._anim_index = (self._anim_index + 1) % len(self._anim_frames)
-            if self._icon:
-                self._icon.icon = self._anim_frames[self._anim_index]
-        except Exception:
-            pass
-        # Schedule next tick
-        config = _load_config()
-        if config.get("animation_enabled", True) and self._running:
-            self._anim_timer = threading.Timer(self._anim_interval, self._anim_tick)
-            self._anim_timer.daemon = True
-            self._anim_timer.start()
-
-    def _update_anim_speed(self, pct):
-        """Update animation speed based on usage percentage."""
-        new_interval = _anim_interval_for_pct(pct)
-        if abs(new_interval - self._anim_interval) / max(self._anim_interval, 0.01) > 0.1:
-            self._anim_interval = new_interval
-
     def _update_icon(self, data=None):
         """Update tray icon image and menu."""
         if data is None:
@@ -1666,8 +1664,6 @@ class ClaudeUsageTray:
         text = f"{int(display_pct)}"
         color = self._get_icon_color(display_pct)
         new_image = _create_icon_image(text, color)
-
-        self._update_anim_speed(sess_pct)
 
         if title_mode == "both":
             tooltip = f"Claude: {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
@@ -1698,7 +1694,6 @@ class ClaudeUsageTray:
 
     def _on_quit(self, *args):
         self._running = False
-        self._stop_animation()
         if self._widget:
             self._widget.schedule(self._widget.quit)
         if self._icon:
@@ -1714,11 +1709,14 @@ class ClaudeUsageTray:
         config = _load_config()
         config[key] = not config.get(key, True)
         _save_config(config)
-        if key == "animation_enabled":
+        if key == "animation_enabled" and self._widget:
+            # Restart or stop widget runner animation
             if config[key]:
-                self._start_animation()
+                self._widget.schedule(self._widget._start_runner_anim)
             else:
-                self._stop_animation()
+                if self._widget._runner_after_id:
+                    self._widget.schedule(
+                        lambda: self._widget._root.after_cancel(self._widget._runner_after_id))
         self._refresh_thread()
 
     def _toggle_widget(self):
@@ -1791,13 +1789,9 @@ class ClaudeUsageTray:
             menu=self._build_menu(data),
         )
 
-        # Create floating widget
+        # Create floating widget (runner animation runs on widget)
         self._widget = FloatingWidget()
         self._widget.update(data)
-
-        # Start animation
-        self._update_anim_speed(pct)
-        self._start_animation()
 
         # Start auto-refresh thread
         refresh_thread = threading.Thread(target=self._auto_refresh_loop, daemon=True)

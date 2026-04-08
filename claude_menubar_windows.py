@@ -52,6 +52,7 @@ DEFAULT_CONFIG = {
     "show_week": True,
     "show_sonnet": True,
     "alert_enabled": True,
+    "animation_enabled": True,
     "show_widget": True,
     "widget_x": None,
     "widget_y": None,
@@ -1154,6 +1155,94 @@ class FloatingWidget:
 
 # ─── Tray Icon ───────────────────────────────────────────────────────────────
 
+_RUNNER_FRAMES_DATA_WIN = [
+    {
+        "head": (7.5, 4.0, 2.5),
+        "body": (8, 6.5, 7.5, 13),
+        "arm_near": (8, 9, 4.5, 10.5),
+        "arm_far": (8, 9, 12, 11),
+        "leg_near": [(7.5, 13), (5, 17.5), (3, 21)],
+        "leg_far": [(7.5, 13), (10.5, 16), (12, 20)],
+    },
+    {
+        "head": (7.5, 3.5, 2.5),
+        "body": (8, 6, 8, 12.5),
+        "arm_near": (8, 8.5, 5.5, 11.5),
+        "arm_far": (8, 8.5, 10.5, 11),
+        "leg_near": [(8, 12.5), (7, 17), (6, 21)],
+        "leg_far": [(8, 12.5), (9.5, 16.5), (10.5, 21)],
+    },
+    {
+        "head": (7.5, 4.0, 2.5),
+        "body": (8, 6.5, 8.5, 13),
+        "arm_near": (8, 9, 12, 10.5),
+        "arm_far": (8, 9, 4, 11),
+        "leg_near": [(8.5, 13), (5.5, 17), (3.5, 21)],
+        "leg_far": [(8.5, 13), (11, 16), (12.5, 20)],
+    },
+    {
+        "head": (7.5, 3.5, 2.5),
+        "body": (8, 6, 8, 12.5),
+        "arm_near": (8, 8.5, 10.5, 10.5),
+        "arm_far": (8, 8.5, 5, 11.5),
+        "leg_near": [(8, 12.5), (9.5, 17), (10.5, 21)],
+        "leg_far": [(8, 12.5), (7, 16.5), (6, 21)],
+    },
+]
+
+
+def _create_runner_frames_pil(size=64):
+    """Create 4 PIL Image frames of a running stick figure for tray animation."""
+    # Scale from SVG viewBox (16x22) to icon size
+    sx = size / 16.0
+    sy = size / 22.0
+    frames = []
+    for fd in _RUNNER_FRAMES_DATA_WIN:
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        # Offset to center vertically
+        oy = (size - 22 * sy) / 2
+
+        fg = (255, 255, 255, 255)
+        fg_dim = (255, 255, 255, 97)  # 38%
+
+        # Head
+        cx, cy, r = fd["head"]
+        draw.ellipse([
+            (cx - r) * sx, cy * sy - r * sy + oy,
+            (cx + r) * sx, cy * sy + r * sy + oy
+        ], fill=fg)
+
+        # Body
+        x1, y1, x2, y2 = fd["body"]
+        draw.line([(x1 * sx, y1 * sy + oy), (x2 * sx, y2 * sy + oy)],
+                  fill=fg, width=max(1, int(1.8 * sx)))
+
+        # Arms
+        for key, color in [("arm_near", fg), ("arm_far", fg_dim)]:
+            x1, y1, x2, y2 = fd[key]
+            draw.line([(x1 * sx, y1 * sy + oy), (x2 * sx, y2 * sy + oy)],
+                      fill=color, width=max(1, int(1.5 * sx)))
+
+        # Legs
+        for key, color in [("leg_near", fg), ("leg_far", fg_dim)]:
+            pts = fd[key]
+            scaled = [(p[0] * sx, p[1] * sy + oy) for p in pts]
+            for j in range(len(scaled) - 1):
+                draw.line([scaled[j], scaled[j + 1]],
+                          fill=color, width=max(1, int(1.9 * sx)))
+
+        frames.append(img)
+    return frames
+
+
+def _anim_interval_for_pct(pct):
+    """Map usage percentage to animation frame interval (seconds).
+    820ms at 0%, 80ms at 100%.
+    """
+    return max(0.08, 0.82 - (pct / 100.0) * 0.74)
+
+
 def _create_icon_image(text="--", color="#4A90D9"):
     """Create a small tray icon with percentage text."""
     size = 64
@@ -1197,6 +1286,11 @@ class ClaudeUsageTray:
         self._icon = None
         self._last_data = {}
         self._widget = None
+        # Animation state
+        self._anim_frames = _create_runner_frames_pil()
+        self._anim_index = 0
+        self._anim_timer = None
+        self._anim_interval = 0.82
 
     def _get_usage_data(self, force_api=False):
         """Gather all usage data for menu building."""
@@ -1474,6 +1568,9 @@ class ClaudeUsageTray:
             pystray.MenuItem("Alerts (80%/90%)",
                              lambda: self._toggle_config("alert_enabled"),
                              checked=lambda _: _load_config().get("alert_enabled", True)),
+            pystray.MenuItem("🏃 Running Animation",
+                             lambda: self._toggle_config("animation_enabled"),
+                             checked=lambda _: _load_config().get("animation_enabled", True)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Floating Widget",
                              lambda: self._toggle_widget(),
@@ -1504,6 +1601,47 @@ class ClaudeUsageTray:
         else:
             return "#4A90D9"  # blue
 
+    # ── animation ───────────────────────────────────────────────────────
+
+    def _start_animation(self):
+        """Start or restart the pulse animation."""
+        self._stop_animation()
+        config = _load_config()
+        if not config.get("animation_enabled", True):
+            return
+        self._anim_timer = threading.Timer(self._anim_interval, self._anim_tick)
+        self._anim_timer.daemon = True
+        self._anim_timer.start()
+
+    def _stop_animation(self):
+        """Stop the animation timer."""
+        if self._anim_timer:
+            self._anim_timer.cancel()
+            self._anim_timer = None
+
+    def _anim_tick(self):
+        """Advance to the next animation frame and schedule next tick."""
+        if not self._running:
+            return
+        try:
+            self._anim_index = (self._anim_index + 1) % len(self._anim_frames)
+            if self._icon:
+                self._icon.icon = self._anim_frames[self._anim_index]
+        except Exception:
+            pass
+        # Schedule next tick
+        config = _load_config()
+        if config.get("animation_enabled", True) and self._running:
+            self._anim_timer = threading.Timer(self._anim_interval, self._anim_tick)
+            self._anim_timer.daemon = True
+            self._anim_timer.start()
+
+    def _update_anim_speed(self, pct):
+        """Update animation speed based on usage percentage."""
+        new_interval = _anim_interval_for_pct(pct)
+        if abs(new_interval - self._anim_interval) / max(self._anim_interval, 0.01) > 0.1:
+            self._anim_interval = new_interval
+
     def _update_icon(self, data=None):
         """Update tray icon image and menu."""
         if data is None:
@@ -1528,6 +1666,8 @@ class ClaudeUsageTray:
         text = f"{int(display_pct)}"
         color = self._get_icon_color(display_pct)
         new_image = _create_icon_image(text, color)
+
+        self._update_anim_speed(sess_pct)
 
         if title_mode == "both":
             tooltip = f"Claude: {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
@@ -1558,6 +1698,7 @@ class ClaudeUsageTray:
 
     def _on_quit(self, *args):
         self._running = False
+        self._stop_animation()
         if self._widget:
             self._widget.schedule(self._widget.quit)
         if self._icon:
@@ -1573,6 +1714,11 @@ class ClaudeUsageTray:
         config = _load_config()
         config[key] = not config.get(key, True)
         _save_config(config)
+        if key == "animation_enabled":
+            if config[key]:
+                self._start_animation()
+            else:
+                self._stop_animation()
         self._refresh_thread()
 
     def _toggle_widget(self):
@@ -1648,6 +1794,10 @@ class ClaudeUsageTray:
         # Create floating widget
         self._widget = FloatingWidget()
         self._widget.update(data)
+
+        # Start animation
+        self._update_anim_speed(pct)
+        self._start_animation()
 
         # Start auto-refresh thread
         refresh_thread = threading.Thread(target=self._auto_refresh_loop, daemon=True)

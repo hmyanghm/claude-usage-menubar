@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     "show_week": True,
     "show_sonnet": True,
     "alert_enabled": True,        # usage threshold alerts on/off
+    "animation_enabled": True,    # RunCat-style pulse animation on/off
 }
 
 # Alert thresholds (percent) — triggers macOS notification once per reset cycle
@@ -383,6 +384,120 @@ import AppKit
 import objc
 from Foundation import NSObject, NSRect, NSSize, NSPoint, NSMakeRect
 
+
+# ─── RunCat-style Running Animation ──────────────────────────────────────
+
+# 4 frames of a running stick figure (SVG viewBox 0 0 16 22)
+_RUNNER_FRAMES_DATA = [
+    {  # Frame 0
+        "head": (7.5, 4.0, 2.5),
+        "body": (8, 6.5, 7.5, 13),
+        "arm_near": (8, 9, 4.5, 10.5),
+        "arm_far": (8, 9, 12, 11),
+        "leg_near": [(7.5, 13), (5, 17.5), (3, 21)],
+        "leg_far": [(7.5, 13), (10.5, 16), (12, 20)],
+    },
+    {  # Frame 1
+        "head": (7.5, 3.5, 2.5),
+        "body": (8, 6, 8, 12.5),
+        "arm_near": (8, 8.5, 5.5, 11.5),
+        "arm_far": (8, 8.5, 10.5, 11),
+        "leg_near": [(8, 12.5), (7, 17), (6, 21)],
+        "leg_far": [(8, 12.5), (9.5, 16.5), (10.5, 21)],
+    },
+    {  # Frame 2
+        "head": (7.5, 4.0, 2.5),
+        "body": (8, 6.5, 8.5, 13),
+        "arm_near": (8, 9, 12, 10.5),
+        "arm_far": (8, 9, 4, 11),
+        "leg_near": [(8.5, 13), (5.5, 17), (3.5, 21)],
+        "leg_far": [(8.5, 13), (11, 16), (12.5, 20)],
+    },
+    {  # Frame 3
+        "head": (7.5, 3.5, 2.5),
+        "body": (8, 6, 8, 12.5),
+        "arm_near": (8, 8.5, 10.5, 10.5),
+        "arm_far": (8, 8.5, 5, 11.5),
+        "leg_near": [(8, 12.5), (9.5, 17), (10.5, 21)],
+        "leg_far": [(8, 12.5), (7, 16.5), (6, 21)],
+    },
+]
+
+
+def _draw_runner_frame(fd, w, h):
+    """Draw a single runner frame into the current NSImage focus."""
+    fg = AppKit.NSColor.blackColor()
+    fg_dim = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0, 0, 0, 0.38)
+
+    # Head
+    cx, cy, r = fd["head"]
+    cy = h - cy
+    head_path = AppKit.NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(cx - r, cy - r, r * 2, r * 2)
+    )
+    fg.setFill()
+    head_path.fill()
+
+    # Body
+    x1, y1, x2, y2 = fd["body"]
+    body = AppKit.NSBezierPath.bezierPath()
+    body.moveToPoint_(NSPoint(x1, h - y1))
+    body.lineToPoint_(NSPoint(x2, h - y2))
+    body.setLineWidth_(1.8)
+    body.setLineCapStyle_(1)  # NSLineCapStyleRound
+    fg.setStroke()
+    body.stroke()
+
+    # Arms
+    for key, color in [("arm_near", fg), ("arm_far", fg_dim)]:
+        x1, y1, x2, y2 = fd[key]
+        arm = AppKit.NSBezierPath.bezierPath()
+        arm.moveToPoint_(NSPoint(x1, h - y1))
+        arm.lineToPoint_(NSPoint(x2, h - y2))
+        arm.setLineWidth_(1.5)
+        arm.setLineCapStyle_(1)
+        color.setStroke()
+        arm.stroke()
+
+    # Legs
+    for key, color in [("leg_near", fg), ("leg_far", fg_dim)]:
+        pts = fd[key]
+        leg = AppKit.NSBezierPath.bezierPath()
+        leg.moveToPoint_(NSPoint(pts[0][0], h - pts[0][1]))
+        for px, py in pts[1:]:
+            leg.lineToPoint_(NSPoint(px, h - py))
+        leg.setLineWidth_(1.9)
+        leg.setLineCapStyle_(1)
+        leg.setLineJoinStyle_(1)  # NSLineJoinStyleRound
+        color.setStroke()
+        leg.stroke()
+
+
+def _create_runner_frames():
+    """Create 4 NSImage template frames of a running stick figure."""
+    w, h = 16.0, 22.0
+    frames = []
+    for fd in _RUNNER_FRAMES_DATA:
+        img = AppKit.NSImage.alloc().initWithSize_(NSSize(w, h))
+        img.lockFocus()
+        _draw_runner_frame(fd, w, h)
+        img.unlockFocus()
+        img.setTemplate_(True)
+        frames.append(img)
+    return frames
+
+
+def _create_static_runner():
+    """Create a single static runner icon (standing pose, frame 1)."""
+    return _create_runner_frames()[1]
+
+
+def _anim_interval_for_pct(pct):
+    """Map usage percentage to animation frame interval (seconds).
+    Matches the HTML mockup: 820ms at 0%, 80ms at 100%.
+    """
+    return max(0.08, 0.82 - (pct / 100.0) * 0.74)
+
 # Color constants
 _BG_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.12, 0.14, 1.0)
 _CARD_BG_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.06)
@@ -482,7 +597,7 @@ class CardView(AppKit.NSView):
 
 
 class HistoryBarView(AppKit.NSView):
-    """Custom view for a single day bar in the 7-day history."""
+    """Custom view for a single day bar in the 7-day history with hover label."""
 
     def initWithFrame_fillRatio_color_(self, frame, ratio, color):
         self = objc.super(HistoryBarView, self).initWithFrame_(frame)
@@ -490,7 +605,49 @@ class HistoryBarView(AppKit.NSView):
             return None
         self._ratio = max(0, min(1.0, ratio))
         self._color = color
+        self._hover_label = None
+        self._cost_text = None
+        # Set up mouse tracking
+        tracking = AppKit.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            self.bounds(),
+            (AppKit.NSTrackingMouseEnteredAndExited | AppKit.NSTrackingActiveInActiveApp),
+            self,
+            None,
+        )
+        self.addTrackingArea_(tracking)
         return self
+
+    def setCostText_(self, text):
+        self._cost_text = text
+
+    def mouseEntered_(self, event):
+        if not self._cost_text:
+            return
+        if self._hover_label is None:
+            bounds = self.bounds()
+            fill_h = max(2, bounds.size.height * self._ratio)
+            label = AppKit.NSTextField.alloc().initWithFrame_(
+                NSMakeRect(-8, fill_h + 2, bounds.size.width + 16, 14)
+            )
+            label.setStringValue_(self._cost_text)
+            label.setBezeled_(False)
+            label.setDrawsBackground_(True)
+            label.setBackgroundColor_(
+                AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.15, 0.15, 0.18, 0.95)
+            )
+            label.setTextColor_(_TEXT_PRIMARY)
+            label.setFont_(AppKit.NSFont.monospacedDigitSystemFontOfSize_weight_(9, 0.0))
+            label.setAlignment_(AppKit.NSTextAlignmentCenter)
+            label.setEditable_(False)
+            label.setSelectable_(False)
+            self._hover_label = label
+        self.addSubview_(self._hover_label)
+        self.setNeedsDisplay_(True)
+
+    def mouseExited_(self, event):
+        if self._hover_label:
+            self._hover_label.removeFromSuperview()
+        self.setNeedsDisplay_(True)
 
     def drawRect_(self, dirty_rect):
         bounds = self.bounds()
@@ -1357,6 +1514,13 @@ class ClaudeUsageApp(rumps.App):
             "plan": False,
         }
         self._cached_data = None
+        # Animation state
+        self._anim_frames = None
+        self._anim_static = None
+        self._anim_index = 0
+        self._anim_timer = None
+        self._anim_interval = 2.0
+        self._anim_pct = 0
         # Minimal fallback menu (quit only)
         self.menu.add(rumps.MenuItem("종료", callback=rumps.quit_application))
 
@@ -1389,12 +1553,81 @@ class ClaudeUsageApp(rumps.App):
             print(f"[POPOVER] Setup failed: {e}", flush=True)
 
         self._register_wake_observer()
+        # Initialize animation frames
+        try:
+            self._anim_frames = _create_runner_frames()
+            self._anim_static = _create_static_runner()
+            print("[ANIM] Lightning frames created", flush=True)
+        except Exception as e:
+            print(f"[ANIM] Frame creation failed: {e}", flush=True)
+
         try:
             self._rebuild()
         except Exception as e:
             print(f"[DEBUG] _initial_load error: {e}", flush=True)
+
+        # Start animation if enabled
+        self._start_animation()
+
         self._refresh_timer = rumps.Timer(self._on_tick, REFRESH_INTERVAL_SEC)
         self._refresh_timer.start()
+
+    # ── animation ───────────────────────────────────────────────────────
+
+    def _start_animation(self):
+        """Start or restart the pulse animation timer."""
+        self._stop_animation()
+        config = _load_config()
+        if not config.get("animation_enabled", True) or not self._anim_frames:
+            # Set static icon
+            if self._anim_static:
+                try:
+                    button = self._nsapp.nsstatusitem.button()
+                    button.setImage_(self._anim_static)
+                except Exception as e:
+                    print(f"[ANIM] static icon error: {e}", flush=True)
+            return
+        # Set initial frame immediately
+        try:
+            button = self._nsapp.nsstatusitem.button()
+            button.setImage_(self._anim_frames[0])
+            print(f"[ANIM] Started animation, interval={self._anim_interval:.2f}s", flush=True)
+        except Exception as e:
+            print(f"[ANIM] initial frame error: {e}", flush=True)
+        self._anim_timer = rumps.Timer(self._on_anim_tick, self._anim_interval)
+        self._anim_timer.start()
+
+    def _stop_animation(self):
+        """Stop the animation timer."""
+        if self._anim_timer:
+            self._anim_timer.stop()
+            self._anim_timer = None
+
+    def _on_anim_tick(self, _=None):
+        """Advance to the next animation frame."""
+        if not self._anim_frames:
+            return
+        try:
+            self._anim_index = (self._anim_index + 1) % len(self._anim_frames)
+            button = self._nsapp.nsstatusitem.button()
+            button.setImage_(self._anim_frames[self._anim_index])
+        except Exception as e:
+            print(f"[ANIM] tick error: {e}", flush=True)
+
+    def _update_anim_speed(self, pct):
+        """Update animation speed based on usage percentage."""
+        new_interval = _anim_interval_for_pct(pct)
+        # Only restart if interval changed significantly (>10%)
+        if abs(new_interval - self._anim_interval) / max(self._anim_interval, 0.01) > 0.1:
+            old = self._anim_interval
+            self._anim_interval = new_interval
+            self._anim_pct = pct
+            config = _load_config()
+            if config.get("animation_enabled", True) and self._anim_frames:
+                self._stop_animation()
+                self._anim_timer = rumps.Timer(self._on_anim_tick, self._anim_interval)
+                self._anim_timer.start()
+                print(f"[ANIM] Speed updated: {old:.2f}s -> {new_interval:.2f}s (pct={pct:.0f}%)", flush=True)
 
     def _close_popover(self):
         """Close popover and remove event monitor."""
@@ -1411,6 +1644,9 @@ class ClaudeUsageApp(rumps.App):
         if self._popover.isShown():
             self._close_popover()
         else:
+            # Reset collapse/settings state on every open
+            self._settings_visible = False
+            self._collapse_state = {k: False for k in self._collapse_state}
             # Show immediately with cached data, then refresh in background
             self._rebuild_popover_content()
             button = self._nsapp.nsstatusitem.button()
@@ -1539,15 +1775,18 @@ class ClaudeUsageApp(rumps.App):
         api_ok = api and "five_hour" in api
         self._check_alerts(sess_pct, sess_reset, week_pct, week_reset)
 
-        # Update title bar
+        # Update title bar (⚡ is now the animated icon, not in text)
         stale_mark = "~" if (api_stale or not api_ok) else ""
         title_mode = config.get("title_display", "session")
         if title_mode == "week":
-            self.title = f"⚡ {stale_mark}{week_pct:.0f}%"
+            self.title = f" {stale_mark}{week_pct:.0f}%"
         elif title_mode == "both":
-            self.title = f"⚡ {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
+            self.title = f" {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
         else:
-            self.title = f"⚡ {stale_mark}{sess_pct:.0f}%"
+            self.title = f" {stale_mark}{sess_pct:.0f}%"
+
+        # Update animation speed based on session usage
+        self._update_anim_speed(sess_pct)
 
         daily = self.tracker.daily_costs(7)
         try:
@@ -1733,28 +1972,90 @@ class ClaudeUsageApp(rumps.App):
         sess = data["sess_totals"]
         week = data["week_totals"]
 
-        lines = [
-            ("── 오늘 ──", True),
-            (f"  토큰 {fmt_tokens(today.get('total', 0))}  (입력 {fmt_tokens(today.get('input', 0))} / 출력 {fmt_tokens(today.get('output', 0))})", False),
-            (f"  비용 {fmt_cost(today.get('cost', 0))}  |  요청 {today.get('requests', 0)}회", False),
-            ("── 세션 (5시간) ──", True),
-            (f"  토큰 {fmt_tokens(sess.get('total', 0))}  (입력 {fmt_tokens(sess.get('input', 0))} / 출력 {fmt_tokens(sess.get('output', 0))})", False),
+        # Each period: title row, then key-value pairs
+        periods = [
+            ("오늘", today, False),
+            ("세션 (5h)", sess, True),
+            ("주간 (7d)", week, False),
         ]
-        if sess.get("cache_write", 0) or sess.get("cache_read", 0):
-            lines.append((f"  캐시 생성 {fmt_tokens(sess.get('cache_write', 0))} / 읽기 {fmt_tokens(sess.get('cache_read', 0))}", False))
-        lines.append((f"  비용 {fmt_cost(sess.get('cost', 0))}", False))
-        lines.extend([
-            ("── 이번 주 (7일) ──", True),
-            (f"  토큰 {fmt_tokens(week.get('total', 0))}  (입력 {fmt_tokens(week.get('input', 0))} / 출력 {fmt_tokens(week.get('output', 0))})", False),
-            (f"  비용 {fmt_cost(week.get('cost', 0))}  |  요청 {week.get('requests', 0)}회", False),
-        ])
 
-        card = self._build_text_card(lines, card_w, card_inner_w)
+        row_h = 14
+        section_gap = 8
+        # Calculate height: each period has title + 2~3 data rows
+        num_rows = 0
+        for label, d, show_cache in periods:
+            num_rows += 1  # title
+            num_rows += 2  # tokens, cost
+            if show_cache and (d.get("cache_write", 0) or d.get("cache_read", 0)):
+                num_rows += 1
+        total_h = num_rows * row_h + (len(periods) - 1) * section_gap
+
+        card = _build_card(total_h)
+        y = total_h
+
+        for idx, (label, d, show_cache) in enumerate(periods):
+            # Section title
+            y -= row_h
+            tf = _make_text_field(label, font_size=10, color=_TEXT_PRIMARY, bold=True)
+            tf.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, row_h))
+            card.addSubview_(tf)
+
+            # Tokens row: left "입력/출력", right "총 토큰"
+            y -= row_h
+            in_t = fmt_tokens(d.get('input', 0))
+            out_t = fmt_tokens(d.get('output', 0))
+            tf_left = _make_text_field(f"입력 {in_t} / 출력 {out_t}", font_size=9,
+                                        color=_TEXT_SECONDARY, bold=False)
+            tf_left.setFrame_(NSMakeRect(CARD_PADDING + 8, y + CARD_PADDING, card_inner_w * 0.65, row_h))
+            card.addSubview_(tf_left)
+            tf_right = _make_text_field(fmt_tokens(d.get('total', 0)), font_size=9,
+                                         color=_TEXT_PRIMARY, bold=False)
+            tf_right.setAlignment_(AppKit.NSTextAlignmentRight)
+            tf_right.setFrame_(NSMakeRect(CARD_PADDING + card_inner_w * 0.65, y + CARD_PADDING,
+                                           card_inner_w * 0.35 - 8, row_h))
+            card.addSubview_(tf_right)
+
+            # Cache row (session only)
+            if show_cache and (d.get("cache_write", 0) or d.get("cache_read", 0)):
+                y -= row_h
+                cache_w = fmt_tokens(d.get('cache_write', 0))
+                cache_r = fmt_tokens(d.get('cache_read', 0))
+                tf = _make_text_field(f"캐시 쓰기 {cache_w} / 읽기 {cache_r}", font_size=9,
+                                       color=_TEXT_SECONDARY, bold=False)
+                tf.setFrame_(NSMakeRect(CARD_PADDING + 8, y + CARD_PADDING, card_inner_w, row_h))
+                card.addSubview_(tf)
+
+            # Cost + requests row
+            y -= row_h
+            cost_text = fmt_cost(d.get('cost', 0))
+            req_text = f"{d.get('requests', 0)}회"
+            tf_left = _make_text_field(f"{req_text} 요청", font_size=9,
+                                        color=_TEXT_SECONDARY, bold=False)
+            tf_left.setFrame_(NSMakeRect(CARD_PADDING + 8, y + CARD_PADDING, card_inner_w * 0.5, row_h))
+            card.addSubview_(tf_left)
+            tf_right = _make_text_field(cost_text, font_size=10,
+                                         color=_TEXT_PRIMARY, bold=True)
+            tf_right.setAlignment_(AppKit.NSTextAlignmentRight)
+            tf_right.setFrame_(NSMakeRect(CARD_PADDING + card_inner_w * 0.5, y + CARD_PADDING,
+                                           card_inner_w * 0.5 - 8, row_h))
+            card.addSubview_(tf_right)
+
+            # Gap between periods
+            if idx < len(periods) - 1:
+                y -= section_gap
+                sep_y = y + CARD_PADDING + section_gap // 2
+                sep = AppKit.NSView.alloc().initWithFrame_(
+                    NSMakeRect(CARD_PADDING + 8, sep_y, card_inner_w - 16, 1)
+                )
+                sep.setWantsLayer_(True)
+                sep.layer().setBackgroundColor_(_SEPARATOR_COLOR.CGColor())
+                card.addSubview_(sep)
+
         views.append((card, card.frame().size.height))
         return views
 
     def _build_model_section(self, data, card_w, card_inner_w):
-        """Build model breakdown collapsible section."""
+        """Build model breakdown collapsible section with proportion bars."""
         views = []
         week_models = data.get("week_models", {})
         week_costs = data.get("week_costs", {})
@@ -1767,14 +2068,60 @@ class ClaudeUsageApp(rumps.App):
         if not self._collapse_state.get("model", False):
             return views
 
-        lines = []
-        for m in sorted(week_costs, key=week_costs.get, reverse=True):
+        sorted_models = sorted(week_costs, key=week_costs.get, reverse=True)
+        total_cost = sum(week_costs.values())
+        max_cost = max(week_costs.values()) if week_costs else 1
+
+        row_h = 14
+        bar_h = 4
+        model_row_h = row_h + bar_h + 6  # label + bar + gap
+        total_h = len(sorted_models) * model_row_h - 6  # no gap after last
+
+        card = _build_card(total_h)
+        y = total_h
+
+        # Color palette for models
+        model_colors = [
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.55, 0.47, 0.96, 1.0),  # purple
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.20, 0.78, 0.35, 1.0),  # green
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.30, 0.65, 0.95, 1.0),  # blue
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.00, 0.72, 0.25, 1.0),  # orange
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.95, 0.40, 0.40, 1.0),  # red
+        ]
+
+        for i, m in enumerate(sorted_models):
             d = week_models[m]
+            cost = week_costs[m]
             total_t = sum(d.values())
             short = m.split("/")[-1] if "/" in m else m
-            lines.append((f"  {short}: {fmt_tokens(total_t)}  {fmt_cost(week_costs[m])}", False))
+            pct = (cost / total_cost * 100) if total_cost > 0 else 0
+            bar_pct = (cost / max_cost * 100) if max_cost > 0 else 0
+            color = model_colors[i % len(model_colors)]
 
-        card = self._build_text_card(lines, card_w, card_inner_w)
+            # Label row: model name left, cost + percentage right
+            y -= row_h
+            tf_left = _make_text_field(short, font_size=10,
+                                        color=_TEXT_PRIMARY, bold=(i == 0))
+            tf_left.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w * 0.5, row_h))
+            card.addSubview_(tf_left)
+
+            tf_right = _make_text_field(f"{fmt_cost(cost)}  {pct:.0f}%", font_size=9,
+                                         color=_TEXT_SECONDARY, bold=False)
+            tf_right.setAlignment_(AppKit.NSTextAlignmentRight)
+            tf_right.setFrame_(NSMakeRect(CARD_PADDING + card_inner_w * 0.5, y + CARD_PADDING,
+                                           card_inner_w * 0.5, row_h))
+            card.addSubview_(tf_right)
+
+            # Proportion bar
+            y -= (bar_h + 2)
+            bar = ProgressBarView.alloc().initWithFrame_percentage_color_(
+                NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, bar_h),
+                bar_pct, color
+            )
+            card.addSubview_(bar)
+
+            y -= 4  # gap
+
         views.append((card, card.frame().size.height))
         return views
 
@@ -1819,7 +2166,7 @@ class ClaudeUsageApp(rumps.App):
                 day_lbl.setFrame_(NSMakeRect(x, CARD_PADDING, bar_w, label_h))
                 card.addSubview_(day_lbl)
 
-                bar.setToolTip_(f"{date_str}: {fmt_cost(cost)}")
+                bar.setCostText_(fmt_cost(cost))
 
         views.append((card, card.frame().size.height))
         return views
@@ -1837,38 +2184,110 @@ class ClaudeUsageApp(rumps.App):
         if not self._collapse_state.get("plan", False):
             return views
 
-        lines = [
-            (f"현재 플랜: {rec['current_plan']}", True),
-            (f"30일 비용: {fmt_cost(rec['total_30d'])} ({rec['active_days']}일 활성)", False),
-            (f"피크 주간: {fmt_cost(rec['peak_week_cost'])}", False),
-        ]
-        if rec['opus_ratio'] > 0.01:
-            lines.append((f"Opus 비중: {rec['opus_ratio']:.0%}", False))
-        lines.append(("", False))
+        line_h = 15
+        bar_h = 5
+        plan_fits = rec['plan_fits']
 
-        for pf in rec['plan_fits']:
+        # Card height calculation
+        # Row 1: title + result line
+        # Row 2: peak week info
+        # Separator
+        # Plan rows: label line + bar + spacing
+        plan_section_h = len(plan_fits) * (14 + 2 + bar_h + 8) - 8  # last row no bottom margin
+        result_h = line_h  # result message
+        total_h = line_h + line_h + 6 + plan_section_h + 4 + result_h
+
+        card = _build_card(total_h)
+        y = total_h
+
+        # Title: current plan
+        y -= line_h
+        tf = _make_text_field(f"{rec['current_plan']} (${rec['rec_price'] if rec['current_plan'] == rec['recommended'] else next(p for n,p,_,_,_ in CLAUDE_PLANS if n == rec['current_plan'])}/월)",
+                               font_size=11, color=_TEXT_PRIMARY, bold=True)
+        tf.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, line_h))
+        card.addSubview_(tf)
+
+        # Peak week cost vs limit
+        y -= line_h
+        cur_plan = next((pf for pf in plan_fits if pf['name'] == rec['current_plan']), None)
+        limit_text = f"${cur_plan['week_limit']:.0f}" if cur_plan else "?"
+        tf = _make_text_field(f"피크 주간: {fmt_cost(rec['peak_week_cost'])} / {limit_text} 한도",
+                               font_size=10, color=_TEXT_SECONDARY, bold=False)
+        tf.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, line_h))
+        card.addSubview_(tf)
+
+        y -= 6  # separator spacing
+
+        # Plan comparison bars
+        for pf in plan_fits:
             usage_pct = pf['usage_pct']
+            display_pct = min(usage_pct, 100)
             if usage_pct > 100:
-                status = "🔴"
+                bar_color = _RED
             elif usage_pct > 80:
-                status = "🟡"
+                bar_color = _YELLOW
             else:
-                status = "🟢"
-            is_rec = " ⭐" if pf['name'] == rec['recommended'] else ""
-            is_cur = " ←" if pf['name'] == rec['current_plan'] else ""
-            lines.append((f"{status} {pf['name']} ${pf['price']}/월 — {usage_pct:.0f}%{is_rec}{is_cur}", False))
+                bar_color = _GREEN
 
-        lines.append(("", False))
-        star = "⭐ " if rec['recommended'] != rec['current_plan'] else "✓ "
-        lines.append((f"{star}추천: {rec['recommended']} (${rec['rec_price']}/월)", True))
-        for r in rec['reasons']:
-            lines.append((f"  → {r}", False))
-        if rec['savings']:
-            lines.append((f"💰 월 ${rec['savings']} 절약 가능", False))
-        elif rec['recommended'] == rec['current_plan']:
-            lines.append(("✅ 현재 플랜이 적합합니다", False))
+            is_cur = pf['name'] == rec['current_plan']
+            is_rec = pf['name'] == rec['recommended']
 
-        card = self._build_text_card(lines, card_w, card_inner_w)
+            # Label: "Pro $20  ━━━ 150% 초과" or "Max 5x $100  ━━ 36% ←"
+            pct_text = f"{usage_pct:.0f}%"
+            if usage_pct > 100:
+                pct_text += " 초과"
+            suffix = ""
+            if is_cur:
+                suffix = " ←"
+            elif is_rec and not is_cur:
+                suffix = " ⭐"
+
+            y -= 14
+            left_label = f"{pf['name']} ${pf['price']}"
+            right_label = f"{pct_text}{suffix}"
+            # Left-aligned plan name
+            tf_left = _make_text_field(left_label, font_size=10,
+                                        color=_TEXT_PRIMARY if (is_cur or is_rec) else _TEXT_SECONDARY,
+                                        bold=(is_cur or is_rec))
+            tf_left.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w * 0.5, 14))
+            card.addSubview_(tf_left)
+            # Right-aligned percentage
+            tf_right = _make_text_field(right_label, font_size=10,
+                                         color=bar_color,
+                                         bold=False)
+            tf_right.setFrame_(NSMakeRect(CARD_PADDING + card_inner_w * 0.5, y + CARD_PADDING, card_inner_w * 0.5, 14))
+            tf_right.setAlignment_(AppKit.NSTextAlignmentRight)
+            card.addSubview_(tf_right)
+
+            # Progress bar (tight to its label, 2px gap)
+            y -= (bar_h + 2)
+            bar = ProgressBarView.alloc().initWithFrame_percentage_color_(
+                NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, bar_h),
+                display_pct, bar_color
+            )
+            card.addSubview_(bar)
+
+            # Space before next plan row (8px)
+            y -= 8
+
+        y -= 4
+
+        # Result message
+        y -= line_h
+        if rec['recommended'] != rec['current_plan']:
+            if rec['savings']:
+                msg = f"⭐ {rec['recommended']}으로 변경 시 월 ${rec['savings']} 절약"
+                msg_color = _YELLOW
+            else:
+                msg = f"⭐ {rec['recommended']} 추천"
+                msg_color = _YELLOW
+        else:
+            msg = "✓ 현재 플랜이 적합합니다"
+            msg_color = _GREEN
+        tf = _make_text_field(msg, font_size=11, color=msg_color, bold=True)
+        tf.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, line_h))
+        card.addSubview_(tf)
+
         views.append((card, card.frame().size.height))
         return views
 
@@ -1946,6 +2365,9 @@ class ClaudeUsageApp(rumps.App):
         settings_lines.append(None)
         alert_on = config.get("alert_enabled", True)
         settings_lines.append((f"{'✓ ' if alert_on else '   '}사용량 알림 (80%/90%)", "alert_enabled", "toggle"))
+
+        anim_on = config.get("animation_enabled", True)
+        settings_lines.append((f"{'✓ ' if anim_on else '   '}🏃 달리기 애니메이션", "animation_enabled", "toggle"))
 
         total_h = len(settings_lines) * line_h
         card = _build_card(total_h)
@@ -2079,11 +2501,11 @@ class ClaudeUsageApp(rumps.App):
             sess_pct = self._cached_data.get("sess_pct", 0)
             week_pct = self._cached_data.get("week_pct", 0)
             if mode == "week":
-                self.title = f"⚡ {stale_mark}{week_pct:.0f}%"
+                self.title = f" {stale_mark}{week_pct:.0f}%"
             elif mode == "both":
-                self.title = f"⚡ {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
+                self.title = f" {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
             else:
-                self.title = f"⚡ {stale_mark}{sess_pct:.0f}%"
+                self.title = f" {stale_mark}{sess_pct:.0f}%"
         self._rebuild_popover_content()
 
     def _toggle_config(self, key):
@@ -2093,6 +2515,9 @@ class ClaudeUsageApp(rumps.App):
         # Update cached config without re-fetching data
         if self._cached_data:
             self._cached_data["config"] = config
+        # Restart or stop animation when toggled
+        if key == "animation_enabled":
+            self._start_animation()
         self._rebuild_popover_content()
 
     # ── callbacks ───────────────────────────────────────────────────────

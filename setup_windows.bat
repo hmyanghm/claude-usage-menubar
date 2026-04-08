@@ -48,18 +48,11 @@ echo.
 echo  Run:  "%INSTALL_DIR%\launch.bat"
 echo.
 set /p ADD_STARTUP="Add to Windows startup? (y/n): "
-if /i "%ADD_STARTUP%"=="y" (
-    echo Creating startup shortcut...
-    powershell -NoProfile -Command ^
-        "$ws = New-Object -ComObject WScript.Shell; ^
-         $sc = $ws.CreateShortcut([System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Windows\Start Menu\Programs\Startup', 'Claude Usage Monitor.lnk')); ^
-         $sc.TargetPath = '%INSTALL_DIR%\launch.bat'; ^
-         $sc.WorkingDirectory = '%INSTALL_DIR%'; ^
-         $sc.Description = 'Claude Code Usage Monitor'; ^
-         $sc.WindowStyle = 7; ^
-         $sc.Save()"
-    echo Startup shortcut created. App will start automatically on login.
-)
+if /i not "%ADD_STARTUP%"=="y" goto :skip_startup
+echo Creating startup shortcut...
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut([System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Windows\Start Menu\Programs\Startup', 'Claude Usage Monitor.lnk')); $sc.TargetPath = '%INSTALL_DIR%\launch.bat'; $sc.WorkingDirectory = '%INSTALL_DIR%'; $sc.Description = 'Claude Code Usage Monitor'; $sc.WindowStyle = 7; $sc.Save()"
+echo Startup shortcut created. App will start automatically on login.
+:skip_startup
 
 echo.
 echo Starting app now...

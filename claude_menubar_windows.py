@@ -56,6 +56,7 @@ DEFAULT_CONFIG = {
     "show_widget": True,
     "widget_x": None,
     "widget_y": None,
+    "widget_theme": "light",
 }
 
 ALERT_THRESHOLDS = [80, 90]
@@ -902,7 +903,7 @@ def _send_notification(title, message):
 
 # ─── Floating Widget ─────────────────────────────────────────────────────────
 
-def _create_runner_tk_frames(height=20):
+def _create_runner_tk_frames(height=20, fg=(26, 26, 46, 255), fg_dim=(26, 26, 46, 97)):
     """Create runner animation frames as PhotoImage-compatible PIL images for tk Canvas."""
     # Scale from SVG 16x22 to widget icon size
     aspect = 16.0 / 22.0
@@ -914,9 +915,6 @@ def _create_runner_tk_frames(height=20):
     for fd in _RUNNER_FRAMES_DATA_WIN:
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
-
-        fg = (192, 202, 245, 255)       # FG color #C0CAF5
-        fg_dim = (192, 202, 245, 97)    # 38% opacity
 
         # Head
         cx, cy, r = fd["head"]
@@ -951,17 +949,22 @@ def _create_runner_tk_frames(height=20):
 class FloatingWidget:
     """Always-on-top slim bar showing usage at a glance, like a macOS menubar."""
 
-    BG = "#1A1B26"
-    BG_INNER = "#24283B"
-    BORDER = "#414868"
-    FG = "#C0CAF5"
-    GREEN = "#9ECE6A"
-    YELLOW = "#E0AF68"
-    ORANGE = "#FF9E64"
-    RED = "#F7768E"
-    ACCENT = "#7AA2F7"
-    DIM = "#565F89"
-    SEP = "#414868"
+    THEMES = {
+        "light": {
+            "BG": "#F0F0F0", "BG_INNER": "#FFFFFF", "BORDER": "#C0C0C0",
+            "FG": "#1A1A2E", "GREEN": "#16A34A", "YELLOW": "#CA8A04",
+            "ORANGE": "#EA580C", "RED": "#DC2626", "ACCENT": "#2563EB",
+            "DIM": "#6B7280", "SEP": "#D1D5DB", "BAR_BG": "#E5E7EB",
+            "RUNNER_FG": (26, 26, 46, 255), "RUNNER_FG_DIM": (26, 26, 46, 97),
+        },
+        "dark": {
+            "BG": "#1A1B26", "BG_INNER": "#24283B", "BORDER": "#414868",
+            "FG": "#E8ECF5", "GREEN": "#9ECE6A", "YELLOW": "#E0AF68",
+            "ORANGE": "#FF9E64", "RED": "#F7768E", "ACCENT": "#7AA2F7",
+            "DIM": "#9AA5CE", "SEP": "#414868", "BAR_BG": "#1A1B26",
+            "RUNNER_FG": (232, 236, 245, 255), "RUNNER_FG_DIM": (232, 236, 245, 97),
+        },
+    }
 
     BAR_W = 50
     BAR_H = 6
@@ -972,7 +975,9 @@ class FloatingWidget:
         self._root.overrideredirect(True)
         self._root.attributes("-topmost", True)
         self._root.attributes("-alpha", 0.94)
-        # Transparent background for rounded corners
+
+        self._apply_theme(_load_config().get("widget_theme", "light"))
+
         self._root.configure(bg=self.BG)
 
         # Canvas for rounded rectangle background
@@ -986,7 +991,8 @@ class FloatingWidget:
         self._built = False
 
         # Runner animation
-        self._runner_pil_frames = _create_runner_tk_frames(height=20)
+        self._runner_pil_frames = _create_runner_tk_frames(
+            height=20, fg=self.RUNNER_FG, fg_dim=self.RUNNER_FG_DIM)
         self._runner_tk_frames = []  # PhotoImage refs (created after mainloop)
         self._runner_index = 0
         self._runner_icon_id = None
@@ -1011,6 +1017,42 @@ class FloatingWidget:
 
         self._visible = config.get("show_widget", True)
 
+    def _apply_theme(self, theme_name):
+        """Apply color theme to widget instance attributes."""
+        t = self.THEMES.get(theme_name, self.THEMES["light"])
+        self.BG = t["BG"]
+        self.BG_INNER = t["BG_INNER"]
+        self.BORDER = t["BORDER"]
+        self.FG = t["FG"]
+        self.GREEN = t["GREEN"]
+        self.YELLOW = t["YELLOW"]
+        self.ORANGE = t["ORANGE"]
+        self.RED = t["RED"]
+        self.ACCENT = t["ACCENT"]
+        self.DIM = t["DIM"]
+        self.SEP = t["SEP"]
+        self.BAR_BG = t["BAR_BG"]
+        self.RUNNER_FG = t["RUNNER_FG"]
+        self.RUNNER_FG_DIM = t["RUNNER_FG_DIM"]
+        self._theme = theme_name
+
+    def rebuild_theme(self, theme_name, data=None):
+        """Switch theme and rebuild the widget."""
+        self._apply_theme(theme_name)
+        self._root.configure(bg=self.BG)
+        self._canvas.configure(bg=self.BG)
+        self._runner_pil_frames = _create_runner_tk_frames(
+            height=20, fg=self.RUNNER_FG, fg_dim=self.RUNNER_FG_DIM)
+        self._canvas.delete("all")
+        self._items = {}
+        self._bar_items = {}
+        self._sep_items = {}
+        self._runner_tk_frames = []
+        self._runner_icon_id = None
+        self._built = False
+        if data:
+            self.update(data)
+
     def _color_for_pct(self, pct):
         if pct >= 90:
             return self.RED
@@ -1021,7 +1063,7 @@ class FloatingWidget:
         return self.GREEN
 
     def _bar_bg_color(self):
-        return "#1A1B26"
+        return self.BAR_BG
 
     def _round_rect(self, canvas, x1, y1, x2, y2, r, **kwargs):
         """Draw a rounded rectangle on canvas."""
@@ -1614,6 +1656,14 @@ class ClaudeUsageTray:
             pystray.MenuItem("Floating Widget",
                              lambda: self._toggle_widget(),
                              checked=lambda _: _load_config().get("show_widget", True)),
+            pystray.MenuItem("Widget Theme", pystray.Menu(
+                pystray.MenuItem("Light",
+                                 lambda: self._set_widget_theme("light"),
+                                 checked=lambda _: _load_config().get("widget_theme", "light") == "light"),
+                pystray.MenuItem("Dark",
+                                 lambda: self._set_widget_theme("dark"),
+                                 checked=lambda _: _load_config().get("widget_theme", "light") == "dark"),
+            )),
         ]
         items.append(pystray.MenuItem("Settings", pystray.Menu(*settings_items)))
 
@@ -1718,6 +1768,14 @@ class ClaudeUsageTray:
                     self._widget.schedule(
                         lambda: self._widget._root.after_cancel(self._widget._runner_after_id))
         self._refresh_thread()
+
+    def _set_widget_theme(self, theme_name):
+        config = _load_config()
+        config["widget_theme"] = theme_name
+        _save_config(config)
+        if self._widget:
+            self._widget.schedule(
+                self._widget.rebuild_theme, theme_name, self._last_data)
 
     def _toggle_widget(self):
         config = _load_config()

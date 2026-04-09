@@ -12,6 +12,11 @@ if ! command -v python3 &> /dev/null; then
 fi
 echo "✅ $(python3 --version)"
 
+# Kill existing processes and unload LaunchAgent
+pkill -9 -f claude_menubar 2>/dev/null || true
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.claude.usage-monitor.plist 2>/dev/null || true
+echo "✅ 기존 프로세스 정리 완료"
+
 INSTALL_DIR="$HOME/.claude-menubar"
 mkdir -p "$INSTALL_DIR"
 

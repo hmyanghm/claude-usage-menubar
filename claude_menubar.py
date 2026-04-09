@@ -146,13 +146,13 @@ def _parse_version(tag):
         return (0, 0, 0)
 
 
-def _check_update():
+def _check_update(force=False):
     """Check GitHub releases for a newer version matching this platform.
     Only considers releases tagged with PLATFORM_TAG_SUFFIX (e.g. v1.0.9-mac).
     Returns (new_version, url) or (None, None).
     """
     now = time.time()
-    if now - _update_cache["checked_at"] < UPDATE_CHECK_INTERVAL:
+    if not force and now - _update_cache["checked_at"] < UPDATE_CHECK_INTERVAL:
         v = _update_cache["latest_version"]
         if v and _parse_version(v) > _parse_version(APP_VERSION):
             return v, _update_cache["release_url"]
@@ -499,9 +499,11 @@ def _create_static_runner():
 
 def _anim_interval_for_pct(pct):
     """Map usage percentage to animation frame interval (seconds).
-    Matches the HTML mockup: 820ms at 0%, 80ms at 100%.
+    0%: 820ms, 80%: 230ms, 90%: 80ms (fastest), 100%: 90ms (overloaded).
     """
-    return max(0.08, 0.82 - (pct / 100.0) * 0.74)
+    if pct <= 90:
+        return max(0.09, 0.82 - (pct / 90.0) * 0.73)
+    return 0.09 - (pct - 90) / 10.0 * 0.01
 
 # Color constants
 _BG_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.12, 0.14, 1.0)
@@ -2466,6 +2468,7 @@ class ClaudeUsageApp(rumps.App):
 
     def _on_refresh_click(self):
         self._rebuild(force_api=True)
+        _check_update(force=True)
         self._rebuild_popover_content()
 
     def _on_settings_click(self):

@@ -764,10 +764,10 @@ def _parse_version(tag):
         return (0, 0, 0)
 
 
-def _check_update():
+def _check_update(force=False):
     """Check GitHub releases for a newer version matching this platform."""
     now = time.time()
-    if now - _update_cache["checked_at"] < UPDATE_CHECK_INTERVAL:
+    if not force and now - _update_cache["checked_at"] < UPDATE_CHECK_INTERVAL:
         v = _update_cache["latest_version"]
         if v and _parse_version(v) > _parse_version(APP_VERSION):
             return v, _update_cache["release_url"]
@@ -1324,9 +1324,11 @@ _RUNNER_FRAMES_DATA_WIN = [
 
 def _anim_interval_for_pct(pct):
     """Map usage percentage to animation frame interval (seconds).
-    820ms at 0%, 80ms at 100%.
+    0%: 820ms, 80%: 230ms, 90%: 80ms (fastest), 100%: 90ms (overloaded).
     """
-    return max(0.08, 0.82 - (pct / 100.0) * 0.74)
+    if pct <= 90:
+        return max(0.09, 0.82 - (pct / 90.0) * 0.73)
+    return 0.09 - (pct - 90) / 10.0 * 0.01
 
 
 def _create_icon_image(text="--", color="#4A90D9"):
@@ -1733,6 +1735,7 @@ class ClaudeUsageTray:
 
     def _on_refresh(self, *args):
         """Manual refresh callback."""
+        _check_update(force=True)
         threading.Thread(target=self._refresh_thread, args=(True,), daemon=True).start()
 
     def _refresh_thread(self, force_api=False):

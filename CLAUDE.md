@@ -46,3 +46,4 @@ app_icon.icns              # 앱 아이콘
 - 푸시 요청 시 `main` 브랜치에 push하고, GitHub 릴리스도 함께 생성
 - 릴리스 태그는 플랫폼별로 분리: `v{버전}-mac`, `v{버전}-win`
 - 버전 업데이트 시 양쪽 파일의 `APP_VERSION`을 동일하게 올릴 것
+- **mac 릴리스를 항상 Latest로 설정**: win 릴리스를 먼저 생성(`--latest=false`)하고, mac 릴리스를 나중에 생성할 것

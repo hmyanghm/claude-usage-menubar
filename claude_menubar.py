@@ -2557,7 +2557,20 @@ class ClaudeUsageApp(rumps.App):
             was_sleeping = (now - last) > REFRESH_INTERVAL_SEC * 2
             if was_sleeping:
                 print(f"[WAKE] Detected sleep gap ({now - last:.0f}s), forcing API refresh...", flush=True)
-            self._rebuild(force_api=was_sleeping)
+            # Run data gathering in background thread to avoid blocking main thread
+            import threading
+            def _bg_rebuild():
+                try:
+                    new_data = self._gather_data(force_api=was_sleeping)
+                    if new_data:
+                        from PyObjCTools import AppHelper
+                        def _update():
+                            self._cached_data = new_data
+                            self._apply_main_thread_updates(new_data)
+                        AppHelper.callAfter(_update)
+                except Exception as e:
+                    print(f"[REBUILD] Background error: {e}", flush=True)
+            threading.Thread(target=_bg_rebuild, daemon=True).start()
         except Exception:
             pass
 

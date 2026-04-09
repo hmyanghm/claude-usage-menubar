@@ -25,7 +25,7 @@ import rumps
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -380,9 +380,14 @@ def _make_label(text):
 
 # ─── NSPopover UI Components ───────────────────────────────────────────────
 
-import AppKit
-import objc
-from Foundation import NSObject, NSRect, NSSize, NSPoint, NSMakeRect
+try:
+    import AppKit
+    import objc
+    from Foundation import NSObject, NSRect, NSSize, NSPoint, NSMakeRect
+except ImportError:
+    print("❌ pyobjc가 설치되지 않았습니다. setup.sh를 다시 실행하거나:", flush=True)
+    print("   pip install pyobjc-framework-Cocoa pyobjc-core", flush=True)
+    sys.exit(1)
 
 
 # ─── RunCat-style Running Animation ──────────────────────────────────────
@@ -1658,10 +1663,11 @@ class ClaudeUsageApp(rumps.App):
             def _bg_refresh():
                 try:
                     new_data = self._gather_data()
-                    # Update on main thread
+                    # Update on main thread (title, animation, popover)
                     from PyObjCTools import AppHelper
                     def _update():
                         self._cached_data = new_data
+                        self._apply_main_thread_updates(new_data)
                         if self._popover and self._popover.isShown():
                             self._rebuild_popover_content()
                     AppHelper.callAfter(_update)
@@ -1736,13 +1742,42 @@ class ClaudeUsageApp(rumps.App):
     # ── popover content builder ──────────────────────────────────────────
 
     def _rebuild(self, force_api=False):
-        """Gather data and update title bar. Popover content is built on open."""
+        """Gather data and update title bar. Popover content is built on open.
+        MUST run on the main thread (updates NSTimer, title bar, alerts).
+        """
         self._last_active_time = time.time()
         try:
             self._cached_data = self._gather_data(force_api=force_api)
+            if self._cached_data:
+                self._apply_main_thread_updates(self._cached_data)
         except Exception as e:
             print(f"[REBUILD] Error: {e}", flush=True)
             self._cached_data = None
+
+    def _apply_main_thread_updates(self, data):
+        """Apply updates that MUST run on the main thread (title, animation, alerts)."""
+        config = data["config"]
+        sess_pct = data["sess_pct"]
+        week_pct = data["week_pct"]
+        api_ok = data["api_ok"]
+        api_stale = data["api_stale"]
+
+        # Update title bar
+        stale_mark = "~" if (api_stale or not api_ok) else ""
+        title_mode = config.get("title_display", "session")
+        if title_mode == "week":
+            self.title = f" {stale_mark}{week_pct:.0f}%"
+        elif title_mode == "both":
+            self.title = f" {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
+        else:
+            self.title = f" {stale_mark}{sess_pct:.0f}%"
+
+        # Update animation speed (NSTimer — main thread only)
+        self._update_anim_speed(sess_pct)
+
+        # Alerts
+        self._check_alerts(sess_pct, data.get("sess_reset"),
+                           week_pct, data.get("week_reset"))
 
     def _gather_data(self, force_api=False):
         """Gather all usage data into a dict for popover rendering."""
@@ -1773,20 +1808,6 @@ class ClaudeUsageApp(rumps.App):
             sonnet_reset = None
 
         api_ok = api and "five_hour" in api
-        self._check_alerts(sess_pct, sess_reset, week_pct, week_reset)
-
-        # Update title bar (⚡ is now the animated icon, not in text)
-        stale_mark = "~" if (api_stale or not api_ok) else ""
-        title_mode = config.get("title_display", "session")
-        if title_mode == "week":
-            self.title = f" {stale_mark}{week_pct:.0f}%"
-        elif title_mode == "both":
-            self.title = f" {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
-        else:
-            self.title = f" {stale_mark}{sess_pct:.0f}%"
-
-        # Update animation speed based on session usage
-        self._update_anim_speed(sess_pct)
 
         daily = self.tracker.daily_costs(7)
         try:

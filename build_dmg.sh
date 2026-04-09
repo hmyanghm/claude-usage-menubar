@@ -24,7 +24,7 @@ source "$VENV_DIR/bin/activate"
 # Install dependencies
 echo "📦 의존성 설치 중..."
 pip install --upgrade pip -q
-pip install pyinstaller rumps -q
+pip install pyinstaller rumps pyobjc-framework-Cocoa pyobjc-core -q
 
 # Clean previous build
 rm -rf build dist

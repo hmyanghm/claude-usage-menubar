@@ -23,7 +23,7 @@ cp "$SCRIPT_DIR/claude_menubar.py" "$INSTALL_DIR/claude_menubar.py"
 echo "📦 설치 중..."
 python3 -m venv "$INSTALL_DIR/venv" 2>/dev/null || true
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip -q
-"$INSTALL_DIR/venv/bin/pip" install rumps -q
+"$INSTALL_DIR/venv/bin/pip" install rumps pyobjc-framework-Cocoa pyobjc-core -q
 echo "✅ 의존성 설치 완료"
 
 # Launcher

@@ -160,6 +160,11 @@ rm -rf ~/.claude-menubar
 rm -f ~/Library/LaunchAgents/com.claude.usage-monitor.plist
 ```
 
+> **앱이 종료되지 않는 경우**: 아래 명령어로 프로세스를 강제 종료한 뒤 다시 삭제하세요.
+> ```bash
+> pkill -9 -f claude_menubar
+> ```
+
 </details>
 
 <details>

@@ -21,6 +21,10 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 
 import rumps
+try:
+    import Quartz  # noqa: F401 — loads CGColorRef type info into PyObjC bridge, suppresses ObjCPointerWarning
+except ImportError:
+    pass
 
 
 # ─── Configuration ───────────────────────────────────────────────────────────
@@ -37,6 +41,7 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 REFRESH_INTERVAL_SEC = 300
 
 CONFIG_PATH = CLAUDE_DIR / "menubar_config.json"
+LAST_TITLE_CACHE_PATH = CLAUDE_DIR / "menubar_last_title.json"
 DEFAULT_CONFIG = {
     "title_display": "session",   # "session" | "week" | "both"
     "show_session": True,
@@ -71,6 +76,69 @@ def _save_config(config):
             json.dump(config, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"[CONFIG] Save error: {e}", flush=True)
+
+
+def _load_last_title_snapshot(path=None):
+    """Load the last known title percentages for fast startup display."""
+    path = path or LAST_TITLE_CACHE_PATH
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "title_mode": data.get("title_mode", "session"),
+            "sess_pct": float(data.get("sess_pct", 0)),
+            "week_pct": float(data.get("week_pct", 0)),
+            "api_stale": bool(data.get("api_stale", False)),
+        }
+    except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError, PermissionError):
+        return None
+
+
+def _save_last_title_snapshot(data, path=None):
+    """Persist the last known title percentages for the next app launch."""
+    path = path or LAST_TITLE_CACHE_PATH
+    snapshot = {
+        "title_mode": data.get("title_mode", "session"),
+        "sess_pct": round(float(data.get("sess_pct", 0))),
+        "week_pct": round(float(data.get("week_pct", 0))),
+        "api_stale": bool(data.get("api_stale", False)),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[CACHE] Save last title error: {e}", flush=True)
+
+
+def _format_title_from_data(data):
+    """Format the menu bar title from usage percentages."""
+    stale_mark = "~" if data.get("api_stale") else ""
+    title_mode = data.get("title_mode", "session")
+    sess_pct = data.get("sess_pct", 0)
+    week_pct = data.get("week_pct", 0)
+    if title_mode == "week":
+        return f" {stale_mark}{week_pct:.0f}%"
+    if title_mode == "both":
+        return f" {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
+    return f" {stale_mark}{sess_pct:.0f}%"
+
+
+def _configure_popover_scroll_view(scroll):
+    """Configure the popover scroll view for stable layout during rebuilds."""
+    scroll.setDrawsBackground_(False)
+    scroll.setHasVerticalScroller_(True)
+    scroll.setHasHorizontalScroller_(False)
+    scroll.setAutohidesScrollers_(True)
+    if hasattr(AppKit, "NSScrollerStyleOverlay"):
+        scroll.setScrollerStyle_(AppKit.NSScrollerStyleOverlay)
+
+
+def _compute_anchor_scroll_origin(header_y, viewport_offset, document_height, viewport_height):
+    """Return a clamped scroll origin that keeps the header near its previous viewport offset."""
+    max_origin = max(0, document_height - viewport_height)
+    origin_y = header_y - viewport_offset
+    return min(max(0, origin_y), max_origin)
 
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 ANTHROPIC_BETA = "oauth-2025-04-20"
@@ -733,6 +801,21 @@ def _build_progress_section(label_text, pct, reset_text=None, is_estimate=False)
     return card
 
 
+class PopoverDelegate(NSObject):
+    """NSPopover delegate."""
+
+    def initWithApp_(self, app):
+        self = objc.super(PopoverDelegate, self).init()
+        if self is None:
+            return None
+        self._app = app
+        return self
+
+    @objc.typedSelector(b"v@:@")
+    def popoverDidClose_(self, notification):
+        pass
+
+
 class PopoverToggleTarget(NSObject):
     """NSObject subclass to serve as the action target for the status bar button."""
 
@@ -745,7 +828,12 @@ class PopoverToggleTarget(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def togglePopover_(self, sender):
-        self._app.toggle_popover(sender)
+        print("[TARGET] togglePopover_ called!", flush=True)
+        try:
+            self._app.toggle_popover(sender)
+        except Exception as e:
+            import traceback
+            print(f"[TARGET] toggle_popover raised: {e}\n{traceback.format_exc()}", flush=True)
 
 
 class _ButtonAction(NSObject):
@@ -761,7 +849,11 @@ class _ButtonAction(NSObject):
     @objc.typedSelector(b"v@:@")
     def perform_(self, sender):
         if self._callback:
-            self._callback()
+            try:
+                self._callback()
+            except Exception as e:
+                import traceback
+                print(f"[ACTION] callback raised: {e}\n{traceback.format_exc()}", flush=True)
 
 
 class PopoverViewController(AppKit.NSViewController):
@@ -786,6 +878,7 @@ class HoverButton(AppKit.NSButton):
         if self is None:
             return None
         self._tracking_area = None
+        self._hovered = False
         self.setWantsLayer_(True)
         self.layer().setCornerRadius_(4.0)
         self._updateTrackingArea()
@@ -796,24 +889,41 @@ class HoverButton(AppKit.NSButton):
             self.removeTrackingArea_(self._tracking_area)
         self._tracking_area = AppKit.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
             self.bounds(),
-            AppKit.NSTrackingMouseEnteredAndExited | AppKit.NSTrackingActiveAlways,
+            AppKit.NSTrackingMouseEnteredAndExited
+            | AppKit.NSTrackingActiveAlways
+            | AppKit.NSTrackingInVisibleRect
+            | AppKit.NSTrackingEnabledDuringMouseDrag,
             self, None
         )
         self.addTrackingArea_(self._tracking_area)
+
+    def _setHoverState_(self, hovered):
+        self._hovered = bool(hovered)
+        color = (
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1, 1, 1, 0.08)
+            if self._hovered
+            else AppKit.NSColor.clearColor()
+        )
+        self.layer().setBackgroundColor_(color.CGColor())
 
     def updateTrackingAreas(self):
         objc.super(HoverButton, self).updateTrackingAreas()
         self._updateTrackingArea()
 
     def mouseEntered_(self, event):
-        self.layer().setBackgroundColor_(
-            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1, 1, 1, 0.08).CGColor()
-        )
+        self._setHoverState_(True)
 
     def mouseExited_(self, event):
-        self.layer().setBackgroundColor_(
-            AppKit.NSColor.clearColor().CGColor()
-        )
+        self._setHoverState_(False)
+
+    def mouseDown_(self, event):
+        self._setHoverState_(False)
+        objc.super(HoverButton, self).mouseDown_(event)
+
+    def viewDidMoveToWindow(self):
+        objc.super(HoverButton, self).viewDidMoveToWindow()
+        if self.window() is None:
+            self._setHoverState_(False)
 
 
 def _send_notification(title, message):
@@ -1481,6 +1591,18 @@ def _recommend_plan(tracker, api_cache):
     }
 
 
+def _current_plan_price_text(rec):
+    """Return the current plan price text, or '?' when the plan is unknown."""
+    if rec["current_plan"] == rec["recommended"]:
+        return str(rec["rec_price"])
+
+    current_price = next(
+        (p for n, p, _, _, _ in CLAUDE_PLANS if n == rec["current_plan"]),
+        None,
+    )
+    return str(current_price) if current_price is not None else "?"
+
+
 # ─── Reset-time helpers ──────────────────────────────────────────────────────
 
 def _next_session_reset():
@@ -1504,16 +1626,23 @@ def _fmt_reset(dt):
 
 class ClaudeUsageApp(rumps.App):
     def __init__(self):
-        super().__init__(name="Claude Usage", title="⚡ Claude", quit_button=None)
+        snapshot = _load_last_title_snapshot()
+        initial_title = _format_title_from_data(snapshot) if snapshot else "⚡ Claude"
+        super().__init__(name="Claude Usage", title=initial_title, quit_button=None)
         self.tracker = UsageTracker()
         self.view_mode = "dashboard"
         self._alerted = {"session": set(), "week": set()}
         self._last_reset = {"session": None, "week": None}
         # Popover state
         self._popover = None
+        self._popover_scroll = None
+        self._popover_view_controller = None
         self._toggle_target = None
+        self._popover_delegate = None
         self._settings_visible = False
         self._action_refs = []
+        self._section_headers = {}
+        self._pending_section_anchor = None
         self._collapse_state = {
             "detail": False,
             "model": False,
@@ -1528,6 +1657,7 @@ class ClaudeUsageApp(rumps.App):
         self._anim_timer = None
         self._anim_interval = 2.0
         self._anim_pct = 0
+        self._last_title_snapshot = snapshot
         # Minimal fallback menu (quit only)
         self.menu.add(rumps.MenuItem("종료", callback=rumps.quit_application))
 
@@ -1540,6 +1670,9 @@ class ClaudeUsageApp(rumps.App):
             AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
         except Exception:
             pass
+
+        if self._last_title_snapshot:
+            self.title = _format_title_from_data(self._last_title_snapshot)
 
         # Set up NSPopover
         try:
@@ -1554,7 +1687,11 @@ class ClaudeUsageApp(rumps.App):
 
             self._toggle_target = PopoverToggleTarget.alloc().initWithApp_(self)
             button.setTarget_(self._toggle_target)
-            button.setAction_(objc.selector(self._toggle_target.togglePopover_, signature=b'v@:@'))
+            sel = objc.selector(self._toggle_target.togglePopover_, signature=b'v@:@')
+            button.setAction_(sel)
+            print(f"[POPOVER] target={button.target()}, action={button.action()}", flush=True)
+            self._popover_delegate = PopoverDelegate.alloc().initWithApp_(self)
+            self._popover.setDelegate_(self._popover_delegate)
             print("[POPOVER] NSPopover set up successfully", flush=True)
         except Exception as e:
             print(f"[POPOVER] Setup failed: {e}", flush=True)
@@ -1568,10 +1705,20 @@ class ClaudeUsageApp(rumps.App):
         except Exception as e:
             print(f"[ANIM] Frame creation failed: {e}", flush=True)
 
-        try:
-            self._rebuild()
-        except Exception as e:
-            print(f"[DEBUG] _initial_load error: {e}", flush=True)
+        # Initial data fetch in background to avoid blocking main thread at startup
+        import threading
+        def _initial_bg():
+            try:
+                new_data = self._gather_data()
+                if new_data:
+                    from PyObjCTools import AppHelper
+                    def _update():
+                        self._cached_data = new_data
+                        self._apply_main_thread_updates(new_data)
+                    AppHelper.callAfter(_update)
+            except Exception as e:
+                print(f"[DEBUG] _initial_load error: {e}", flush=True)
+        threading.Thread(target=_initial_bg, daemon=True).start()
 
         # Start animation if enabled
         self._start_animation()
@@ -1637,29 +1784,39 @@ class ClaudeUsageApp(rumps.App):
                 print(f"[ANIM] Speed updated: {old:.2f}s -> {new_interval:.2f}s (pct={pct:.0f}%)", flush=True)
 
     def _close_popover(self):
-        """Close popover and remove event monitor."""
+        """Close popover if visible."""
         if self._popover and self._popover.isShown():
             self._popover.close()
-        if getattr(self, '_event_monitor', None):
-            AppKit.NSEvent.removeMonitor_(self._event_monitor)
-            self._event_monitor = None
 
     def toggle_popover(self, sender):
         """Toggle the NSPopover open/closed."""
+        print(
+            f"[TOGGLE] called, popover={self._popover is not None}, "
+            f"isShown={self._popover.isShown() if self._popover else 'N/A'}",
+            flush=True,
+        )
         if not self._popover:
             return
         if self._popover.isShown():
+            print("[TOGGLE] closing popover", flush=True)
             self._close_popover()
         else:
+            print("[TOGGLE] opening popover", flush=True)
             # Reset collapse/settings state on every open
             self._settings_visible = False
             self._collapse_state = {k: False for k in self._collapse_state}
             # Show immediately with cached data, then refresh in background
-            self._rebuild_popover_content()
+            try:
+                self._rebuild_popover_content()
+            except Exception as e:
+                print(f"[TOGGLE] _rebuild_popover_content error: {e}", flush=True)
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
             button = self._nsapp.nsstatusitem.button()
+            print(f"[TOGGLE] calling showRelativeToRect, button={button}", flush=True)
             self._popover.showRelativeToRect_ofView_preferredEdge_(
                 button.bounds(), button, AppKit.NSMinYEdge
             )
+            print(f"[TOGGLE] after show, isShown={self._popover.isShown()}", flush=True)
             # Background data refresh
             import threading
             def _bg_refresh():
@@ -1676,16 +1833,6 @@ class ClaudeUsageApp(rumps.App):
                 except Exception as e:
                     print(f"[POPOVER] Background refresh error: {e}", flush=True)
             threading.Thread(target=_bg_refresh, daemon=True).start()
-            # Add global event monitor to close on outside click
-            if getattr(self, '_event_monitor', None):
-                AppKit.NSEvent.removeMonitor_(self._event_monitor)
-            mask = (AppKit.NSEventMaskLeftMouseDown | AppKit.NSEventMaskRightMouseDown)
-            def _on_global_click(event):
-                self._close_popover()
-                return event
-            self._event_monitor = AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-                mask, _on_global_click
-            )
 
     def _register_wake_observer(self):
         """Listen for macOS wake-from-sleep to trigger immediate refresh."""
@@ -1723,23 +1870,35 @@ class ClaudeUsageApp(rumps.App):
         self._wake_retry_timer.start()
 
     def _wake_refresh(self, timer):
-        """Called after wake-from-sleep."""
+        """Called after wake-from-sleep — runs data fetch in background to avoid blocking main thread."""
         timer.stop()
         self._wake_retry_timer = None
         max_retries = 5
-        try:
-            print("[WAKE] Attempting refresh...", flush=True)
-            self._rebuild(force_api=True)
-            self._wake_retry_count = 0
-            print("[WAKE] Refresh successful", flush=True)
-        except Exception as e:
-            self._wake_retry_count += 1
-            if self._wake_retry_count < max_retries:
-                print(f"[WAKE] Refresh failed ({e}), will retry...", flush=True)
-                self._start_wake_retry()
-            else:
-                print("[WAKE] Max retries reached, giving up.", flush=True)
-                self._wake_retry_count = 0
+        import threading
+        def _bg():
+            try:
+                print("[WAKE] Attempting refresh...", flush=True)
+                new_data = self._gather_data(force_api=True)
+                if new_data:
+                    from PyObjCTools import AppHelper
+                    def _update():
+                        self._cached_data = new_data
+                        self._apply_main_thread_updates(new_data)
+                        self._wake_retry_count = 0
+                        print("[WAKE] Refresh successful", flush=True)
+                    AppHelper.callAfter(_update)
+                else:
+                    raise Exception("no data returned")
+            except Exception as e:
+                self._wake_retry_count += 1
+                if self._wake_retry_count < max_retries:
+                    print(f"[WAKE] Refresh failed ({e}), will retry...", flush=True)
+                    from PyObjCTools import AppHelper
+                    AppHelper.callAfter(self._start_wake_retry)
+                else:
+                    print("[WAKE] Max retries reached, giving up.", flush=True)
+                    self._wake_retry_count = 0
+        threading.Thread(target=_bg, daemon=True).start()
 
     # ── popover content builder ──────────────────────────────────────────
 
@@ -1765,14 +1924,14 @@ class ClaudeUsageApp(rumps.App):
         api_stale = data["api_stale"]
 
         # Update title bar
-        stale_mark = "~" if (api_stale or not api_ok) else ""
-        title_mode = config.get("title_display", "session")
-        if title_mode == "week":
-            self.title = f" {stale_mark}{week_pct:.0f}%"
-        elif title_mode == "both":
-            self.title = f" {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
-        else:
-            self.title = f" {stale_mark}{sess_pct:.0f}%"
+        title_data = {
+            "title_mode": config.get("title_display", "session"),
+            "sess_pct": sess_pct,
+            "week_pct": week_pct,
+            "api_stale": (api_stale or not api_ok),
+        }
+        self.title = _format_title_from_data(title_data)
+        _save_last_title_snapshot(title_data)
 
         # Update animation speed (NSTimer — main thread only)
         self._update_anim_speed(sess_pct)
@@ -1836,6 +1995,7 @@ class ClaudeUsageApp(rumps.App):
         if not self._popover:
             return
         self._action_refs = []
+        self._section_headers = {}
 
         data = self._cached_data
         if not data:
@@ -1946,18 +2106,58 @@ class ClaudeUsageApp(rumps.App):
         scroll = AppKit.NSScrollView.alloc().initWithFrame_(
             NSMakeRect(0, 0, POPOVER_WIDTH, max_h)
         )
-        scroll.setDrawsBackground_(False)
-        scroll.setHasVerticalScroller_(True)
-        scroll.setHasHorizontalScroller_(False)
-        scroll.setAutohidesScrollers_(True)
+        _configure_popover_scroll_view(scroll)
         scroll.setDocumentView_(container)
-
-        # Scroll to top
-        container.scrollPoint_(NSPoint(0, total_h))
-
-        vc = PopoverViewController.alloc().initWithView_(scroll)
         self._popover.setContentSize_(NSSize(POPOVER_WIDTH, max_h))
-        self._popover.setContentViewController_(vc)
+        self._popover_scroll = scroll
+        if self._popover_view_controller is None:
+            self._popover_view_controller = PopoverViewController.alloc().initWithView_(scroll)
+            self._popover.setContentViewController_(self._popover_view_controller)
+        else:
+            self._popover_view_controller.setView_(scroll)
+        self._restore_pending_section_anchor()
+
+    def _capture_section_anchor(self, key):
+        """Remember the clicked section header's current position inside the viewport."""
+        if not self._popover_scroll:
+            self._pending_section_anchor = None
+            return
+
+        header = self._section_headers.get(key)
+        clip = self._popover_scroll.contentView() if self._popover_scroll else None
+        if not header or not clip:
+            self._pending_section_anchor = None
+            return
+
+        clip_bounds = clip.bounds()
+        header_y = header.frame().origin.y
+        viewport_offset = header_y - clip_bounds.origin.y
+        self._pending_section_anchor = {
+            "key": key,
+            "viewport_offset": viewport_offset,
+        }
+
+    def _restore_pending_section_anchor(self):
+        """Restore the clicked section header near its previous viewport position."""
+        anchor = self._pending_section_anchor
+        self._pending_section_anchor = None
+        if not anchor or not self._popover_scroll:
+            return
+
+        header = self._section_headers.get(anchor["key"])
+        clip = self._popover_scroll.contentView()
+        doc = self._popover_scroll.documentView()
+        if not header or not clip or not doc:
+            return
+
+        origin_y = _compute_anchor_scroll_origin(
+            header.frame().origin.y,
+            anchor["viewport_offset"],
+            doc.frame().size.height,
+            clip.bounds().size.height,
+        )
+        clip.scrollToPoint_(NSPoint(0, origin_y))
+        self._popover_scroll.reflectScrolledClipView_(clip)
 
     # ── collapsible section helpers ──
 
@@ -1971,8 +2171,10 @@ class ClaudeUsageApp(rumps.App):
         btn.setAlignment_(AppKit.NSTextAlignmentLeft)
         btn.setBordered_(False)
         btn.setContentTintColor_(_TEXT_SECONDARY)
+        self._section_headers[key] = btn
 
         def toggle():
+            self._capture_section_anchor(key)
             self._collapse_state[key] = not self._collapse_state.get(key, False)
             self._rebuild_popover_content()
 
@@ -2225,7 +2427,7 @@ class ClaudeUsageApp(rumps.App):
 
         # Title: current plan
         y -= line_h
-        tf = _make_text_field(f"{rec['current_plan']} (${rec['rec_price'] if rec['current_plan'] == rec['recommended'] else next(p for n,p,_,_,_ in CLAUDE_PLANS if n == rec['current_plan'])}/월)",
+        tf = _make_text_field(f"{rec['current_plan']} (${_current_plan_price_text(rec)}/월)",
                                font_size=11, color=_TEXT_PRIMARY, bold=True)
         tf.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, line_h))
         card.addSubview_(tf)
@@ -2242,7 +2444,7 @@ class ClaudeUsageApp(rumps.App):
         y -= 6  # separator spacing
 
         # Plan comparison bars
-        for pf in plan_fits:
+        for idx, pf in enumerate(plan_fits):
             usage_pct = pf['usage_pct']
             display_pct = min(usage_pct, 100)
             if usage_pct > 100:
@@ -2291,7 +2493,8 @@ class ClaudeUsageApp(rumps.App):
             card.addSubview_(bar)
 
             # Space before next plan row (8px)
-            y -= 8
+            if idx < len(plan_fits) - 1:
+                y -= 8
 
         y -= 4
 

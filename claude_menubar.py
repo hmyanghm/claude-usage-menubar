@@ -29,7 +29,7 @@ except ImportError:
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -460,39 +460,73 @@ except ImportError:
 
 # ─── RunCat-style Running Animation ──────────────────────────────────────
 
-# 4 frames of a running stick figure (SVG viewBox 0 0 16 22)
+# 8 frames of a walking stick figure (SVG viewBox 0 0 16 22)
+# Cycle: contact → recoil → passing → high → contact (mirror) → recoil → passing → high
+# Body bobs down at contact/recoil, up at passing/high. Arms swing contralateral to legs.
 _RUNNER_FRAMES_DATA = [
-    {  # Frame 0
+    {  # Frame 0 - Contact A: far foot heel strike forward, near foot back extended
         "head": (7.5, 4.0, 2.5),
         "body": (8, 6.5, 7.5, 13),
-        "arm_near": (8, 9, 4.5, 10.5),
-        "arm_far": (8, 9, 12, 11),
-        "leg_near": [(7.5, 13), (5, 17.5), (3, 21)],
-        "leg_far": [(7.5, 13), (10.5, 16), (12, 20)],
+        "arm_near": (8, 9, 11.5, 10.5),
+        "arm_far": (8, 9, 4.5, 11),
+        "leg_near": [(7.5, 13), (5.5, 17), (3, 21)],
+        "leg_far": [(7.5, 13), (10, 16.5), (12, 20)],
     },
-    {  # Frame 1
+    {  # Frame 1 - Recoil A: body lowest, far knee absorbs, near toe pushes off
+        "head": (7.5, 4.3, 2.5),
+        "body": (8, 6.8, 7.8, 13.3),
+        "arm_near": (8, 9.3, 10, 11),
+        "arm_far": (8, 9.3, 6, 11),
+        "leg_near": [(7.8, 13.3), (5.5, 17.5), (4, 20.5)],
+        "leg_far": [(7.8, 13.3), (9, 17), (11, 21)],
+    },
+    {  # Frame 2 - Passing A→B: body rising, near leg knee high, foot tucked under
         "head": (7.5, 3.5, 2.5),
         "body": (8, 6, 8, 12.5),
-        "arm_near": (8, 8.5, 5.5, 11.5),
-        "arm_far": (8, 8.5, 10.5, 11),
-        "leg_near": [(8, 12.5), (7, 17), (6, 21)],
-        "leg_far": [(8, 12.5), (9.5, 16.5), (10.5, 21)],
+        "arm_near": (8, 8.5, 8.5, 11.5),
+        "arm_far": (8, 8.5, 7.5, 11),
+        "leg_near": [(8, 12.5), (9, 15.5), (7, 18.5)],
+        "leg_far": [(8, 12.5), (8.5, 17), (9, 21)],
     },
-    {  # Frame 2
+    {  # Frame 3 - High A→B: body apex, near leg extending forward, foot descending
+        "head": (7.5, 3.2, 2.5),
+        "body": (8, 5.7, 8.3, 12.2),
+        "arm_near": (8, 8.2, 5.5, 11),
+        "arm_far": (8, 8.2, 10.5, 11),
+        "leg_near": [(8.3, 12.2), (10.8, 16.5), (11.5, 19.5)],
+        "leg_far": [(8.3, 12.2), (7, 17), (6, 21)],
+    },
+    {  # Frame 4 - Contact B: near foot heel strike forward, far foot back extended
         "head": (7.5, 4.0, 2.5),
         "body": (8, 6.5, 8.5, 13),
-        "arm_near": (8, 9, 12, 10.5),
-        "arm_far": (8, 9, 4, 11),
-        "leg_near": [(8.5, 13), (5.5, 17), (3.5, 21)],
-        "leg_far": [(8.5, 13), (11, 16), (12.5, 20)],
+        "arm_near": (8, 9, 4.5, 10.5),
+        "arm_far": (8, 9, 11.5, 11),
+        "leg_near": [(8.5, 13), (11, 16.5), (12.5, 20)],
+        "leg_far": [(8.5, 13), (6, 17), (3.5, 21)],
     },
-    {  # Frame 3
+    {  # Frame 5 - Recoil B: body lowest, near knee absorbs, far toe pushes off
+        "head": (7.5, 4.3, 2.5),
+        "body": (8, 6.8, 8.2, 13.3),
+        "arm_near": (8, 9.3, 6, 11),
+        "arm_far": (8, 9.3, 10, 11),
+        "leg_near": [(8.2, 13.3), (10, 17.5), (11, 21)],
+        "leg_far": [(8.2, 13.3), (6.5, 17), (4.5, 20.5)],
+    },
+    {  # Frame 6 - Passing B→A: body rising, far leg knee high, foot tucked under
         "head": (7.5, 3.5, 2.5),
         "body": (8, 6, 8, 12.5),
-        "arm_near": (8, 8.5, 10.5, 10.5),
-        "arm_far": (8, 8.5, 5, 11.5),
-        "leg_near": [(8, 12.5), (9.5, 17), (10.5, 21)],
-        "leg_far": [(8, 12.5), (7, 16.5), (6, 21)],
+        "arm_near": (8, 8.5, 7.5, 11.5),
+        "arm_far": (8, 8.5, 8.5, 11),
+        "leg_near": [(8, 12.5), (8.5, 17), (9, 21)],
+        "leg_far": [(8, 12.5), (9, 15.5), (7, 18.5)],
+    },
+    {  # Frame 7 - High B→A: body apex, far leg extending forward, foot descending
+        "head": (7.5, 3.2, 2.5),
+        "body": (8, 5.7, 7.7, 12.2),
+        "arm_near": (8, 8.2, 10.5, 11),
+        "arm_far": (8, 8.2, 5.5, 11),
+        "leg_near": [(7.7, 12.2), (7, 17), (6, 21)],
+        "leg_far": [(7.7, 12.2), (10.8, 16.5), (11.5, 19.5)],
     },
 ]
 
@@ -547,7 +581,7 @@ def _draw_runner_frame(fd, w, h):
 
 
 def _create_runner_frames():
-    """Create 4 NSImage template frames of a running stick figure."""
+    """Create NSImage template frames of a walking stick figure."""
     w, h = 16.0, 22.0
     frames = []
     for fd in _RUNNER_FRAMES_DATA:
@@ -566,12 +600,12 @@ def _create_static_runner():
 
 
 def _anim_interval_for_pct(pct):
-    """Map usage percentage to animation frame interval (seconds).
-    0%: 820ms, 80%: 230ms, 90%: 80ms (fastest), 100%: 90ms (overloaded).
+    """Map usage percentage to animation frame interval (seconds). 8-frame walk cycle.
+    0%: 615ms, 80%: 130ms, 90%: 68ms, 100%: 60ms (fastest).
     """
     if pct <= 90:
-        return max(0.09, 0.82 - (pct / 90.0) * 0.73)
-    return 0.09 - (pct - 90) / 10.0 * 0.01
+        return max(0.068, 0.615 - (pct / 90.0) * 0.547)
+    return 0.068 - (pct - 90) / 10.0 * 0.008
 
 # Color constants
 _BG_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.12, 0.14, 1.0)

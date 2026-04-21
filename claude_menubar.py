@@ -29,7 +29,7 @@ except ImportError:
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -463,7 +463,7 @@ except ImportError:
 # 8 frames of a walking stick figure (SVG viewBox 0 0 16 22)
 # Cycle: contact → recoil → passing → high → contact (mirror) → recoil → passing → high
 # Body bobs down at contact/recoil, up at passing/high. Arms swing contralateral to legs.
-_RUNNER_FRAMES_DATA = [
+_WALK_FRAMES_DATA = [
     {  # Frame 0 - Contact A: far foot heel strike forward, near foot back extended
         "head": (7.5, 4.0, 2.5),
         "body": (8, 6.5, 7.5, 13),
@@ -530,6 +530,77 @@ _RUNNER_FRAMES_DATA = [
     },
 ]
 
+# 8 frames of a running stick figure (activated when usage >= 80%)
+# Cycle: plant → midstance → push-off → flight (mirror ×2)
+# Body leans forward throughout (top x=9.5, bottom x=7.5). Knees lift high,
+# feet go airborne in flight frames. Arms are short (bent elbow) with large vertical swing.
+_RUN_FRAMES_DATA = [
+    {  # Frame 0 - Plant A: far foot heel strike, near leg bent high behind (airborne)
+        "head": (9, 4.5, 2.5),
+        "body": (9.5, 7, 7.5, 13.3),
+        "arm_near": (9.2, 9.3, 10.5, 7.5),
+        "arm_far": (9.2, 9.3, 6.5, 10.5),
+        "leg_near": [(7.5, 13.3), (6.5, 15.5), (5, 18)],
+        "leg_far": [(7.5, 13.3), (9.5, 16.5), (11.5, 20.5)],
+    },
+    {  # Frame 1 - Midstance A: far foot flat under body, near knee rising forward
+        "head": (9, 4.2, 2.5),
+        "body": (9.5, 6.7, 7.5, 13),
+        "arm_near": (9.2, 9, 9, 8),
+        "arm_far": (9.2, 9, 7.5, 10),
+        "leg_near": [(7.5, 13), (7.5, 15), (7, 17.5)],
+        "leg_far": [(7.5, 13), (8, 17), (8.5, 21)],
+    },
+    {  # Frame 2 - Push-off A: far toe pushing off, near knee at peak (body highest)
+        "head": (9, 3.8, 2.5),
+        "body": (9.5, 6.3, 7.5, 12.5),
+        "arm_near": (9.2, 8.5, 7.5, 8.5),
+        "arm_far": (9.2, 8.5, 9.5, 9.5),
+        "leg_near": [(7.5, 12.5), (9, 13.5), (8, 16)],
+        "leg_far": [(7.5, 12.5), (7.5, 16.5), (6.5, 20)],
+    },
+    {  # Frame 3 - Flight A→B: both feet airborne, near leg reaching forward
+        "head": (9, 3.5, 2.5),
+        "body": (9.5, 6, 7.5, 12.2),
+        "arm_near": (9.2, 8, 6.5, 9),
+        "arm_far": (9.2, 8, 10.5, 9),
+        "leg_near": [(7.5, 12.2), (10, 14), (11, 17.5)],
+        "leg_far": [(7.5, 12.2), (6, 15.5), (5, 18)],
+    },
+    {  # Frame 4 - Plant B: near foot heel strike, far leg bent high behind (airborne)
+        "head": (9, 4.5, 2.5),
+        "body": (9.5, 7, 7.5, 13.3),
+        "arm_near": (9.2, 9.3, 6.5, 10.5),
+        "arm_far": (9.2, 9.3, 10.5, 7.5),
+        "leg_near": [(7.5, 13.3), (9.5, 16.5), (11.5, 20.5)],
+        "leg_far": [(7.5, 13.3), (6.5, 15.5), (5, 18)],
+    },
+    {  # Frame 5 - Midstance B: near foot flat under body, far knee rising
+        "head": (9, 4.2, 2.5),
+        "body": (9.5, 6.7, 7.5, 13),
+        "arm_near": (9.2, 9, 7.5, 10),
+        "arm_far": (9.2, 9, 9, 8),
+        "leg_near": [(7.5, 13), (8, 17), (8.5, 21)],
+        "leg_far": [(7.5, 13), (7.5, 15), (7, 17.5)],
+    },
+    {  # Frame 6 - Push-off B: near toe pushing off, far knee at peak
+        "head": (9, 3.8, 2.5),
+        "body": (9.5, 6.3, 7.5, 12.5),
+        "arm_near": (9.2, 8.5, 9.5, 9.5),
+        "arm_far": (9.2, 8.5, 7.5, 8.5),
+        "leg_near": [(7.5, 12.5), (7.5, 16.5), (6.5, 20)],
+        "leg_far": [(7.5, 12.5), (9, 13.5), (8, 16)],
+    },
+    {  # Frame 7 - Flight B→A: both feet airborne, far leg reaching forward
+        "head": (9, 3.5, 2.5),
+        "body": (9.5, 6, 7.5, 12.2),
+        "arm_near": (9.2, 8, 10.5, 9),
+        "arm_far": (9.2, 8, 6.5, 9),
+        "leg_near": [(7.5, 12.2), (6, 15.5), (5, 18)],
+        "leg_far": [(7.5, 12.2), (10, 14), (11, 17.5)],
+    },
+]
+
 
 def _draw_runner_frame(fd, w, h):
     """Draw a single runner frame into the current NSImage focus."""
@@ -580,11 +651,13 @@ def _draw_runner_frame(fd, w, h):
         leg.stroke()
 
 
-def _create_runner_frames():
-    """Create NSImage template frames of a walking stick figure."""
+def _create_runner_frames(frames_data=None):
+    """Create NSImage template frames from the given frame data (defaults to walk)."""
+    if frames_data is None:
+        frames_data = _WALK_FRAMES_DATA
     w, h = 16.0, 22.0
     frames = []
-    for fd in _RUNNER_FRAMES_DATA:
+    for fd in frames_data:
         img = AppKit.NSImage.alloc().initWithSize_(NSSize(w, h))
         img.lockFocus()
         _draw_runner_frame(fd, w, h)
@@ -599,13 +672,18 @@ def _create_static_runner():
     return _create_runner_frames()[1]
 
 
+RUN_THRESHOLD_HIGH = 80  # switch to run frameset when pct crosses this
+RUN_THRESHOLD_LOW = 75   # switch back to walk when pct drops below this (hysteresis)
+
+
 def _anim_interval_for_pct(pct):
-    """Map usage percentage to animation frame interval (seconds). 8-frame walk cycle.
-    0%: 615ms, 80%: 130ms, 90%: 68ms, 100%: 60ms (fastest).
+    """Map usage percentage to animation frame interval (seconds).
+    Walk mode (pct<80): 615ms at 0%, 130ms at 80%.
+    Run mode (pct>=80): 130ms at 80%, 50ms at 100% (sprint).
     """
-    if pct <= 90:
-        return max(0.068, 0.615 - (pct / 90.0) * 0.547)
-    return 0.068 - (pct - 90) / 10.0 * 0.008
+    if pct < RUN_THRESHOLD_HIGH:
+        return max(0.13, 0.615 - (pct / 80.0) * 0.485)
+    return max(0.05, 0.13 - ((pct - 80) / 20.0) * 0.08)
 
 # Color constants
 _BG_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.12, 0.14, 1.0)
@@ -1685,7 +1763,10 @@ class ClaudeUsageApp(rumps.App):
         }
         self._cached_data = None
         # Animation state
+        self._walk_frames = None
+        self._run_frames = None
         self._anim_frames = None
+        self._anim_mode = "walk"
         self._anim_static = None
         self._anim_index = 0
         self._anim_timer = None
@@ -1733,9 +1814,11 @@ class ClaudeUsageApp(rumps.App):
         self._register_wake_observer()
         # Initialize animation frames
         try:
-            self._anim_frames = _create_runner_frames()
+            self._walk_frames = _create_runner_frames(_WALK_FRAMES_DATA)
+            self._run_frames = _create_runner_frames(_RUN_FRAMES_DATA)
+            self._anim_frames = self._walk_frames
             self._anim_static = _create_static_runner()
-            print("[ANIM] Lightning frames created", flush=True)
+            print("[ANIM] Walk/run frames created", flush=True)
         except Exception as e:
             print(f"[ANIM] Frame creation failed: {e}", flush=True)
 
@@ -1803,10 +1886,24 @@ class ClaudeUsageApp(rumps.App):
             print(f"[ANIM] tick error: {e}", flush=True)
 
     def _update_anim_speed(self, pct):
-        """Update animation speed based on usage percentage."""
+        """Update animation speed and mode based on usage percentage.
+        Switches between walk/run framesets at 80% (hysteresis: back to walk at 75%).
+        """
         new_interval = _anim_interval_for_pct(pct)
-        # Only restart if interval changed significantly (>10%)
-        if abs(new_interval - self._anim_interval) / max(self._anim_interval, 0.01) > 0.1:
+        # Hysteresis: once running, keep running until pct drops below LOW threshold
+        if self._anim_mode == "walk":
+            new_mode = "run" if pct >= RUN_THRESHOLD_HIGH else "walk"
+        else:
+            new_mode = "walk" if pct < RUN_THRESHOLD_LOW else "run"
+
+        mode_changed = new_mode != self._anim_mode
+        interval_changed = abs(new_interval - self._anim_interval) / max(self._anim_interval, 0.01) > 0.1
+
+        if mode_changed:
+            self._anim_mode = new_mode
+            self._anim_frames = self._run_frames if new_mode == "run" else self._walk_frames
+
+        if mode_changed or interval_changed:
             old = self._anim_interval
             self._anim_interval = new_interval
             self._anim_pct = pct
@@ -1815,7 +1912,7 @@ class ClaudeUsageApp(rumps.App):
                 self._stop_animation()
                 self._anim_timer = rumps.Timer(self._on_anim_tick, self._anim_interval)
                 self._anim_timer.start()
-                print(f"[ANIM] Speed updated: {old:.2f}s -> {new_interval:.2f}s (pct={pct:.0f}%)", flush=True)
+                print(f"[ANIM] mode={new_mode} {old:.2f}s -> {new_interval:.2f}s (pct={pct:.0f}%)", flush=True)
 
     def _close_popover(self):
         """Close popover if visible."""

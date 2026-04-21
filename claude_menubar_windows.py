@@ -34,7 +34,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.1.3"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -903,8 +903,12 @@ def _send_notification(title, message):
 
 # ─── Floating Widget ─────────────────────────────────────────────────────────
 
-def _create_runner_tk_frames(height=20, fg=(26, 26, 46, 255), fg_dim=(26, 26, 46, 97)):
-    """Create runner animation frames as PhotoImage-compatible PIL images for tk Canvas."""
+def _create_runner_tk_frames(height=20, fg=(26, 26, 46, 255), fg_dim=(26, 26, 46, 97),
+                              frames_data=None):
+    """Create runner animation frames as PhotoImage-compatible PIL images for tk Canvas.
+    Pass frames_data to choose walk or run frameset (defaults to walk)."""
+    if frames_data is None:
+        frames_data = _WALK_FRAMES_DATA_WIN
     # Scale from SVG 16x22 to widget icon size
     aspect = 16.0 / 22.0
     w = int(height * aspect)
@@ -912,7 +916,7 @@ def _create_runner_tk_frames(height=20, fg=(26, 26, 46, 255), fg_dim=(26, 26, 46
     sx = w / 16.0
     sy = h / 22.0
     frames = []
-    for fd in _RUNNER_FRAMES_DATA_WIN:
+    for fd in frames_data:
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
@@ -990,10 +994,18 @@ class FloatingWidget:
         self._sep_items = {}
         self._built = False
 
-        # Runner animation
-        self._runner_pil_frames = _create_runner_tk_frames(
-            height=20, fg=self.RUNNER_FG, fg_dim=self.RUNNER_FG_DIM)
-        self._runner_tk_frames = []  # PhotoImage refs (created after mainloop)
+        # Runner animation - walk + run framesets, active set selected by usage %
+        self._walk_pil_frames = _create_runner_tk_frames(
+            height=20, fg=self.RUNNER_FG, fg_dim=self.RUNNER_FG_DIM,
+            frames_data=_WALK_FRAMES_DATA_WIN)
+        self._run_pil_frames = _create_runner_tk_frames(
+            height=20, fg=self.RUNNER_FG, fg_dim=self.RUNNER_FG_DIM,
+            frames_data=_RUN_FRAMES_DATA_WIN)
+        self._runner_pil_frames = self._walk_pil_frames  # active (used by _build)
+        self._walk_tk_frames = []  # created after mainloop
+        self._run_tk_frames = []
+        self._runner_tk_frames = []
+        self._anim_mode = "walk"
         self._runner_index = 0
         self._runner_icon_id = None
         self._runner_anim_interval = 820  # ms
@@ -1041,12 +1053,21 @@ class FloatingWidget:
         self._apply_theme(theme_name)
         self._root.configure(bg=self.BG)
         self._canvas.configure(bg=self.BG)
-        self._runner_pil_frames = _create_runner_tk_frames(
-            height=20, fg=self.RUNNER_FG, fg_dim=self.RUNNER_FG_DIM)
+        self._walk_pil_frames = _create_runner_tk_frames(
+            height=20, fg=self.RUNNER_FG, fg_dim=self.RUNNER_FG_DIM,
+            frames_data=_WALK_FRAMES_DATA_WIN)
+        self._run_pil_frames = _create_runner_tk_frames(
+            height=20, fg=self.RUNNER_FG, fg_dim=self.RUNNER_FG_DIM,
+            frames_data=_RUN_FRAMES_DATA_WIN)
+        self._runner_pil_frames = (
+            self._run_pil_frames if self._anim_mode == "run" else self._walk_pil_frames
+        )
         self._canvas.delete("all")
         self._items = {}
         self._bar_items = {}
         self._sep_items = {}
+        self._walk_tk_frames = []
+        self._run_tk_frames = []
         self._runner_tk_frames = []
         self._runner_icon_id = None
         self._built = False
@@ -1111,9 +1132,13 @@ class FloatingWidget:
         self._round_rect(c, 0, 0, total_w, total_h, 6,
                          fill=self.BG_INNER, outline=self.BORDER, width=1)
 
-        # Runner animation icon
+        # Runner animation icon - build both walk/run tk framesets, select active
         from PIL import ImageTk
-        self._runner_tk_frames = [ImageTk.PhotoImage(f) for f in self._runner_pil_frames]
+        self._walk_tk_frames = [ImageTk.PhotoImage(f) for f in self._walk_pil_frames]
+        self._run_tk_frames = [ImageTk.PhotoImage(f) for f in self._run_pil_frames]
+        self._runner_tk_frames = (
+            self._run_tk_frames if self._anim_mode == "run" else self._walk_tk_frames
+        )
         self._runner_icon_id = c.create_image(
             pad_left + 7, total_h // 2,
             image=self._runner_tk_frames[0], anchor="center"
@@ -1235,8 +1260,19 @@ class FloatingWidget:
                 self._runner_anim_interval, self._runner_tick)
 
     def update_anim_speed(self, pct):
-        """Update runner animation speed from usage percentage."""
+        """Update runner animation speed and mode (walk/run) from usage percentage.
+        Hysteresis: switch to run at pct>=80, back to walk at pct<75."""
         self._runner_anim_interval = int(_anim_interval_for_pct(pct) * 1000)
+        if self._anim_mode == "walk":
+            new_mode = "run" if pct >= RUN_THRESHOLD_HIGH else "walk"
+        else:
+            new_mode = "walk" if pct < RUN_THRESHOLD_LOW else "run"
+        if new_mode != self._anim_mode:
+            self._anim_mode = new_mode
+            if self._walk_tk_frames and self._run_tk_frames:
+                self._runner_tk_frames = (
+                    self._run_tk_frames if new_mode == "run" else self._walk_tk_frames
+                )
 
     def update(self, data):
         """Update widget from usage data. Must be called from tk thread."""
@@ -1285,7 +1321,7 @@ class FloatingWidget:
 
 # ─── Tray Icon ───────────────────────────────────────────────────────────────
 
-_RUNNER_FRAMES_DATA_WIN = [
+_WALK_FRAMES_DATA_WIN = [
     {  # Frame 0 - Contact A
         "head": (7.5, 4.0, 2.5),
         "body": (8, 6.5, 7.5, 13),
@@ -1352,15 +1388,87 @@ _RUNNER_FRAMES_DATA_WIN = [
     },
 ]
 
+# 8 frames of a running stick figure (activated when usage >= 80%)
+_RUN_FRAMES_DATA_WIN = [
+    {  # Frame 0 - Plant A
+        "head": (9, 4.5, 2.5),
+        "body": (9.5, 7, 7.5, 13.3),
+        "arm_near": (9.2, 9.3, 10.5, 7.5),
+        "arm_far": (9.2, 9.3, 6.5, 10.5),
+        "leg_near": [(7.5, 13.3), (6.5, 15.5), (5, 18)],
+        "leg_far": [(7.5, 13.3), (9.5, 16.5), (11.5, 20.5)],
+    },
+    {  # Frame 1 - Midstance A
+        "head": (9, 4.2, 2.5),
+        "body": (9.5, 6.7, 7.5, 13),
+        "arm_near": (9.2, 9, 9, 8),
+        "arm_far": (9.2, 9, 7.5, 10),
+        "leg_near": [(7.5, 13), (7.5, 15), (7, 17.5)],
+        "leg_far": [(7.5, 13), (8, 17), (8.5, 21)],
+    },
+    {  # Frame 2 - Push-off A
+        "head": (9, 3.8, 2.5),
+        "body": (9.5, 6.3, 7.5, 12.5),
+        "arm_near": (9.2, 8.5, 7.5, 8.5),
+        "arm_far": (9.2, 8.5, 9.5, 9.5),
+        "leg_near": [(7.5, 12.5), (9, 13.5), (8, 16)],
+        "leg_far": [(7.5, 12.5), (7.5, 16.5), (6.5, 20)],
+    },
+    {  # Frame 3 - Flight A→B
+        "head": (9, 3.5, 2.5),
+        "body": (9.5, 6, 7.5, 12.2),
+        "arm_near": (9.2, 8, 6.5, 9),
+        "arm_far": (9.2, 8, 10.5, 9),
+        "leg_near": [(7.5, 12.2), (10, 14), (11, 17.5)],
+        "leg_far": [(7.5, 12.2), (6, 15.5), (5, 18)],
+    },
+    {  # Frame 4 - Plant B
+        "head": (9, 4.5, 2.5),
+        "body": (9.5, 7, 7.5, 13.3),
+        "arm_near": (9.2, 9.3, 6.5, 10.5),
+        "arm_far": (9.2, 9.3, 10.5, 7.5),
+        "leg_near": [(7.5, 13.3), (9.5, 16.5), (11.5, 20.5)],
+        "leg_far": [(7.5, 13.3), (6.5, 15.5), (5, 18)],
+    },
+    {  # Frame 5 - Midstance B
+        "head": (9, 4.2, 2.5),
+        "body": (9.5, 6.7, 7.5, 13),
+        "arm_near": (9.2, 9, 7.5, 10),
+        "arm_far": (9.2, 9, 9, 8),
+        "leg_near": [(7.5, 13), (8, 17), (8.5, 21)],
+        "leg_far": [(7.5, 13), (7.5, 15), (7, 17.5)],
+    },
+    {  # Frame 6 - Push-off B
+        "head": (9, 3.8, 2.5),
+        "body": (9.5, 6.3, 7.5, 12.5),
+        "arm_near": (9.2, 8.5, 9.5, 9.5),
+        "arm_far": (9.2, 8.5, 7.5, 8.5),
+        "leg_near": [(7.5, 12.5), (7.5, 16.5), (6.5, 20)],
+        "leg_far": [(7.5, 12.5), (9, 13.5), (8, 16)],
+    },
+    {  # Frame 7 - Flight B→A
+        "head": (9, 3.5, 2.5),
+        "body": (9.5, 6, 7.5, 12.2),
+        "arm_near": (9.2, 8, 10.5, 9),
+        "arm_far": (9.2, 8, 6.5, 9),
+        "leg_near": [(7.5, 12.2), (6, 15.5), (5, 18)],
+        "leg_far": [(7.5, 12.2), (10, 14), (11, 17.5)],
+    },
+]
+
+
+RUN_THRESHOLD_HIGH = 80  # switch to run frameset at pct >= this
+RUN_THRESHOLD_LOW = 75   # switch back to walk at pct < this (hysteresis)
 
 
 def _anim_interval_for_pct(pct):
-    """Map usage percentage to animation frame interval (seconds). 8-frame walk cycle.
-    0%: 615ms, 80%: 130ms, 90%: 68ms, 100%: 60ms (fastest).
+    """Map usage percentage to animation frame interval (seconds).
+    Walk mode (pct<80): 615ms at 0%, 130ms at 80%.
+    Run mode (pct>=80): 130ms at 80%, 50ms at 100% (sprint).
     """
-    if pct <= 90:
-        return max(0.068, 0.615 - (pct / 90.0) * 0.547)
-    return 0.068 - (pct - 90) / 10.0 * 0.008
+    if pct < RUN_THRESHOLD_HIGH:
+        return max(0.13, 0.615 - (pct / 80.0) * 0.485)
+    return max(0.05, 0.13 - ((pct - 80) / 20.0) * 0.08)
 
 
 def _create_icon_image(text="--", color="#4A90D9"):

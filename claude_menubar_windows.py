@@ -34,7 +34,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.3"
+APP_VERSION = "2.1.4"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -43,6 +43,7 @@ UPDATE_CHECK_INTERVAL = 3600
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
+CODEX_DIR = Path.home() / ".codex"
 REFRESH_INTERVAL_SEC = 300
 
 CONFIG_PATH = CLAUDE_DIR / "menubar_config.json"
@@ -652,6 +653,104 @@ class UsageTracker:
             key = d.strftime("%m/%d")
             result.append((key, day_costs.get(key, 0.0)))
         return result
+
+
+class CodexUsageTracker:
+    """Read Codex CLI local session logs for the latest rate-limit snapshot."""
+
+    def __init__(self, codex_dir=None):
+        self.codex_dir = Path(codex_dir) if codex_dir else CODEX_DIR
+        self.sessions_dir = self.codex_dir / "sessions"
+
+    def _jsonl_files(self):
+        if not self.sessions_dir.exists():
+            return []
+        try:
+            return sorted(
+                self.sessions_dir.rglob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return []
+
+    def _parse_ts(self, raw):
+        if raw is None:
+            return None
+        try:
+            if isinstance(raw, (int, float)):
+                return datetime.fromtimestamp(raw, tz=timezone.utc).astimezone().replace(tzinfo=None)
+            text = str(raw).replace("Z", "+00:00")
+            return datetime.fromisoformat(text).astimezone().replace(tzinfo=None)
+        except (ValueError, TypeError, OSError):
+            return None
+
+    def _parse_reset_epoch(self, raw):
+        try:
+            if raw is None:
+                return None
+            return datetime.fromtimestamp(float(raw))
+        except (TypeError, ValueError, OSError):
+            return None
+
+    def _snapshot_from_event(self, event):
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
+            return None
+
+        rate_limits = payload.get("rate_limits")
+        if not isinstance(rate_limits, dict):
+            return None
+
+        primary = rate_limits.get("primary") or {}
+        secondary = rate_limits.get("secondary") or {}
+        info = payload.get("info") or {}
+        total_usage = info.get("total_token_usage") or {}
+        last_usage = info.get("last_token_usage") or {}
+
+        return {
+            "available": True,
+            "timestamp": self._parse_ts(event.get("timestamp")),
+            "session_pct": float(primary.get("used_percent") or 0),
+            "session_reset": self._parse_reset_epoch(primary.get("resets_at")),
+            "session_window_minutes": primary.get("window_minutes"),
+            "week_pct": float(secondary.get("used_percent") or 0),
+            "week_reset": self._parse_reset_epoch(secondary.get("resets_at")),
+            "week_window_minutes": secondary.get("window_minutes"),
+            "plan_type": rate_limits.get("plan_type"),
+            "total_tokens": int(total_usage.get("total_tokens") or 0),
+            "input_tokens": int(total_usage.get("input_tokens") or 0),
+            "output_tokens": int(total_usage.get("output_tokens") or 0),
+            "cached_input_tokens": int(total_usage.get("cached_input_tokens") or 0),
+            "reasoning_output_tokens": int(total_usage.get("reasoning_output_tokens") or 0),
+            "last_tokens": int(last_usage.get("total_tokens") or 0),
+        }
+
+    def latest_usage(self):
+        latest = None
+        for fp in self._jsonl_files():
+            try:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        if not line.strip():
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        snapshot = self._snapshot_from_event(event)
+                        if not snapshot:
+                            continue
+                        snapshot["source_path"] = str(fp)
+                        ts = snapshot.get("timestamp")
+                        if latest is None or (ts and (latest.get("timestamp") is None or ts > latest["timestamp"])):
+                            latest = snapshot
+            except (PermissionError, FileNotFoundError, OSError):
+                continue
+
+        if latest:
+            return latest
+        return {"available": False}
 
 
 # ─── Plan recommendation ────────────────────────────────────────────────────
@@ -1508,6 +1607,7 @@ def _create_icon_image(text="--", color="#4A90D9"):
 class ClaudeUsageTray:
     def __init__(self):
         self.tracker = UsageTracker()
+        self.codex_tracker = CodexUsageTracker()
         self._alerted = {"session": set(), "week": set()}
         self._last_reset = {"session": None, "week": None}
         self._running = True
@@ -1547,6 +1647,7 @@ class ClaudeUsageTray:
 
         # Check alerts
         self._check_alerts(sess_pct, sess_reset, week_pct, week_reset)
+        codex_usage = self.codex_tracker.latest_usage()
 
         return {
             "config": config,
@@ -1557,6 +1658,7 @@ class ClaudeUsageTray:
             "week_pct": week_pct, "week_reset": week_reset,
             "sonnet_pct": sonnet_pct, "sonnet_reset": sonnet_reset,
             "api_ok": api_ok, "api_stale": api_stale, "api": api,
+            "codex_usage": codex_usage,
         }
 
     def _check_alerts(self, sess_pct, sess_reset, week_pct, week_reset):
@@ -1649,6 +1751,35 @@ class ClaudeUsageTray:
             if data["sonnet_reset"]:
                 items.append(pystray.MenuItem(f"  \u23f3 Resets {_fmt_reset(data['sonnet_reset'])}", _noop))
             items.append(pystray.Menu.SEPARATOR)
+
+        codex_usage = data.get("codex_usage") or {}
+        if codex_usage.get("available"):
+            codex_items = []
+            codex_items.append(pystray.MenuItem(
+                f"Session: {make_bar(codex_usage['session_pct'])}",
+                _noop))
+            if codex_usage.get("session_reset"):
+                codex_items.append(pystray.MenuItem(
+                    f"  \u23f3 Resets {_fmt_reset(codex_usage['session_reset'])}",
+                    _noop))
+            plan = codex_usage.get("plan_type")
+            week_label = f"Week ({plan})" if plan else "Week"
+            codex_items.append(pystray.MenuItem(
+                f"{week_label}: {make_bar(codex_usage['week_pct'])}",
+                _noop))
+            if codex_usage.get("week_reset"):
+                codex_items.append(pystray.MenuItem(
+                    f"  \u23f3 Resets {_fmt_reset(codex_usage['week_reset'])}",
+                    _noop))
+            codex_items.append(pystray.Menu.SEPARATOR)
+            codex_items.append(pystray.MenuItem(
+                f"Total tokens {fmt_tokens(codex_usage.get('total_tokens', 0))}",
+                _noop))
+            if codex_usage.get("last_tokens"):
+                codex_items.append(pystray.MenuItem(
+                    f"Last request {fmt_tokens(codex_usage['last_tokens'])}",
+                    _noop))
+            items.append(pystray.MenuItem("Codex (local)", pystray.Menu(*codex_items)))
 
         # Detail submenu
         sess_totals = data["sess_totals"]

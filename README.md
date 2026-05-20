@@ -3,7 +3,7 @@
 > macOS 메뉴바 / Windows 시스템 트레이에서 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 사용량을 실시간으로 모니터링하세요.
 > `/usage` 명령어를 매번 치지 않아도, 한 눈에 확인할 수 있습니다.
 
-![macOS](https://img.shields.io/badge/macOS-menu%20bar-blue) ![Windows](https://img.shields.io/badge/Windows-system%20tray-0078D6) ![version](https://img.shields.io/badge/version-2.1.0-green)
+![macOS](https://img.shields.io/badge/macOS-menu%20bar-blue) ![Windows](https://img.shields.io/badge/Windows-system%20tray-0078D6) ![version](https://img.shields.io/badge/version-2.1.4-green)
 
 <p align="center">
   <img src="screenshots/menubar-preview.png" alt="Claude Usage Monitor - 메뉴바 미리보기" width="500">

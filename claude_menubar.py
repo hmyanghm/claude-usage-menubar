@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import glob
+import math
 import time
 import tempfile
 import shutil
@@ -29,7 +30,7 @@ except ImportError:
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.3"
+APP_VERSION = "2.1.4"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -38,12 +39,14 @@ UPDATE_CHECK_INTERVAL = 3600  # check every 1 hour
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
+CODEX_DIR = Path.home() / ".codex"
 REFRESH_INTERVAL_SEC = 300
 
 CONFIG_PATH = CLAUDE_DIR / "menubar_config.json"
 LAST_TITLE_CACHE_PATH = CLAUDE_DIR / "menubar_last_title.json"
 DEFAULT_CONFIG = {
     "title_display": "session",   # "session" | "week" | "both"
+    "title_source": "claude",     # "claude" | "codex"
     "show_session": True,
     "show_week": True,
     "show_sonnet": True,
@@ -86,6 +89,7 @@ def _load_last_title_snapshot(path=None):
             data = json.load(f)
         return {
             "title_mode": data.get("title_mode", "session"),
+            "title_source": data.get("title_source", "claude"),
             "sess_pct": float(data.get("sess_pct", 0)),
             "week_pct": float(data.get("week_pct", 0)),
             "api_stale": bool(data.get("api_stale", False)),
@@ -99,6 +103,7 @@ def _save_last_title_snapshot(data, path=None):
     path = path or LAST_TITLE_CACHE_PATH
     snapshot = {
         "title_mode": data.get("title_mode", "session"),
+        "title_source": data.get("title_source", "claude"),
         "sess_pct": round(float(data.get("sess_pct", 0))),
         "week_pct": round(float(data.get("week_pct", 0))),
         "api_stale": bool(data.get("api_stale", False)),
@@ -672,18 +677,211 @@ def _create_static_runner():
     return _create_runner_frames()[1]
 
 
+ROBOT_FRAMES_PER_DURATION = 12
+ROBOT_CYCLE_DURATIONS = 5
+
+
+def _robot_lerp(a, b, t):
+    return a + (b - a) * t
+
+
+def _robot_color_components(pct):
+    """Return the robot color gradient from ai-robot-preview.html as RGB floats."""
+    cpu = max(0, min(100, float(pct)))
+    if cpu <= 33:
+        t = cpu / 33
+        return (
+            1.0,
+            _robot_lerp(255, 191, t) / 255,
+            _robot_lerp(255, 36, t) / 255,
+        )
+    if cpu <= 66:
+        t = (cpu - 33) / 33
+        return (
+            1.0,
+            _robot_lerp(191, 115, t) / 255,
+            _robot_lerp(36, 22, t) / 255,
+        )
+    t = (cpu - 66) / 34
+    return (
+        _robot_lerp(255, 220, t) / 255,
+        _robot_lerp(115, 38, t) / 255,
+        _robot_lerp(22, 38, t) / 255,
+    )
+
+
+def _robot_duration_for_pct(pct):
+    """Animation duration in seconds, matching the HTML preview: 2.0s -> 0.35s."""
+    cpu = max(0, min(100, float(pct)))
+    return 2.0 - (cpu / 100.0) * 1.65
+
+
+def _title_badge_provider_for_config(config):
+    """Return the provider badge to draw next to the menu bar usage text."""
+    return "openai" if config.get("title_source") == "codex" else "claude"
+
+
+def _draw_provider_badge(provider, x, y, size, filled_openai=False):
+    """Draw a provider mark inside the current graphics context."""
+    if provider == "openai":
+        if filled_openai:
+            bg = AppKit.NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(x, y, size, size))
+            AppKit.NSColor.whiteColor().setFill()
+            bg.fill()
+            AppKit.NSColor.blackColor().setStroke()
+        else:
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.35, 0.65, 1.0, 1.0).setStroke()
+        cx = x + size / 2
+        cy = y + size / 2
+        for i in range(6):
+            petal = AppKit.NSBezierPath.bezierPath()
+            petal.moveToPoint_(NSPoint(cx, cy - size * 0.08))
+            petal.curveToPoint_controlPoint1_controlPoint2_(
+                NSPoint(cx + size * 0.05, cy - size * 0.37),
+                NSPoint(cx - size * 0.12, cy - size * 0.20),
+                NSPoint(cx - size * 0.03, cy - size * 0.34),
+            )
+            petal.curveToPoint_controlPoint1_controlPoint2_(
+                NSPoint(cx + size * 0.22, cy - size * 0.26),
+                NSPoint(cx + size * 0.14, cy - size * 0.40),
+                NSPoint(cx + size * 0.25, cy - size * 0.37),
+            )
+            transform = AppKit.NSAffineTransform.transform()
+            transform.translateXBy_yBy_(cx, cy)
+            transform.rotateByDegrees_(i * 60)
+            transform.translateXBy_yBy_(-cx, -cy)
+            petal.transformUsingAffineTransform_(transform)
+            petal.setLineWidth_(max(1.0, size * 0.11))
+            petal.setLineCapStyle_(1)
+            petal.setLineJoinStyle_(1)
+            petal.stroke()
+        center = AppKit.NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(cx - size * 0.09, cy - size * 0.09, size * 0.18, size * 0.18)
+        )
+        AppKit.NSColor.labelColor().setFill()
+        center.fill()
+        return
+
+    color = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.85, 0.47, 0.34, 1.0)
+    color.setFill()
+    cx = x + size / 2
+    cy = y + size / 2
+    for i in range(8):
+        spoke = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(cx - size * 0.05, cy - size * 0.40, size * 0.10, size * 0.32),
+            size * 0.03,
+            size * 0.03,
+        )
+        transform = AppKit.NSAffineTransform.transform()
+        transform.translateXBy_yBy_(cx, cy)
+        transform.rotateByDegrees_(i * 45)
+        transform.translateXBy_yBy_(-cx, -cy)
+        spoke.transformUsingAffineTransform_(transform)
+        spoke.fill()
+
+
+def _draw_robot_frame(phase_units, pct, w, h, provider=None):
+    """Draw one AI robot frame into the current NSImage focus."""
+    r, g, b = _robot_color_components(pct)
+    body_color = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 1.0)
+    cutout_color = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.11, 0.11, 0.12, 1.0)
+
+    antenna_phase = phase_units % 1.0
+    antenna_opacity = ((math.sin(antenna_phase * 2 * math.pi) + 1) / 2 * 0.7 + 0.3)
+    sway_phase = (phase_units / 2.5) % 1.0
+    sway_angle = math.sin(sway_phase * 2 * math.pi) * 4.0
+    blink_phase = (phase_units / 2.0) % 1.0
+    eye_ry = 1.2
+    if 0.92 < blink_phase < 0.97:
+        t = (blink_phase - 0.92) / 0.05
+        eye_ry = 1.2 - math.sin(t * math.pi) * 1.05
+
+    scale = w / 18.0
+
+    transform = AppKit.NSAffineTransform.transform()
+    transform.translateXBy_yBy_(0, h)
+    transform.scaleXBy_yBy_(scale, -scale)
+    transform.concat()
+
+    # Head
+    body_color.setFill()
+    head = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        NSMakeRect(3, 5, 12, 11), 2, 2
+    )
+    head.fill()
+
+    # Antenna
+    AppKit.NSGraphicsContext.saveGraphicsState()
+    antenna_transform = AppKit.NSAffineTransform.transform()
+    antenna_transform.translateXBy_yBy_(9, 5)
+    antenna_transform.rotateByDegrees_(sway_angle)
+    antenna_transform.translateXBy_yBy_(-9, -5)
+    antenna_transform.concat()
+
+    stem = AppKit.NSBezierPath.bezierPath()
+    stem.moveToPoint_(NSPoint(9, 3))
+    stem.lineToPoint_(NSPoint(9, 5))
+    stem.setLineWidth_(1.2)
+    stem.setLineCapStyle_(1)
+    body_color.setStroke()
+    stem.stroke()
+
+    tip_color = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, antenna_opacity)
+    tip_color.setFill()
+    tip = AppKit.NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(8, 1.3, 2, 2))
+    tip.fill()
+    AppKit.NSGraphicsContext.restoreGraphicsState()
+
+    # Eyes
+    cutout_color.setFill()
+    left_eye = AppKit.NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(5.3, 9.5 - eye_ry, 2.4, 2 * eye_ry)
+    )
+    right_eye = AppKit.NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(10.3, 9.5 - eye_ry, 2.4, 2 * eye_ry)
+    )
+    left_eye.fill()
+    right_eye.fill()
+
+    # Mouth
+    mouth = AppKit.NSBezierPath.bezierPath()
+    mouth.moveToPoint_(NSPoint(6.8, 13))
+    mouth.lineToPoint_(NSPoint(11.2, 13))
+    mouth.setLineWidth_(1)
+    mouth.setLineCapStyle_(1)
+    cutout_color.setStroke()
+    mouth.stroke()
+
+    if provider:
+        _draw_provider_badge(provider, 10.0, 1.8, 7.5)
+
+def _create_robot_frame(phase_units=0.0, pct=0, provider=None):
+    """Create a single colored robot NSImage frame with a provider hairpin badge."""
+    w, h = 28.0, 22.0
+    img = AppKit.NSImage.alloc().initWithSize_(NSSize(w, h))
+    img.lockFocus()
+    _draw_robot_frame(phase_units, pct, 22.0, h, provider=provider)
+    img.unlockFocus()
+    img.setTemplate_(False)
+    return img
+
+
+def _create_robot_frames(pct=0, provider=None):
+    """Create robot animation frames matching the preview's antenna/sway/blink timing."""
+    frame_count = ROBOT_FRAMES_PER_DURATION * ROBOT_CYCLE_DURATIONS
+    return [
+        _create_robot_frame(i / ROBOT_FRAMES_PER_DURATION, pct, provider=provider)
+        for i in range(frame_count)
+    ]
+
+
 RUN_THRESHOLD_HIGH = 80  # switch to run frameset when pct crosses this
 RUN_THRESHOLD_LOW = 75   # switch back to walk when pct drops below this (hysteresis)
 
 
 def _anim_interval_for_pct(pct):
-    """Map usage percentage to animation frame interval (seconds).
-    Walk mode (pct<80): 615ms at 0%, 130ms at 80%.
-    Run mode (pct>=80): 130ms at 80%, 50ms at 100% (sprint).
-    """
-    if pct < RUN_THRESHOLD_HIGH:
-        return max(0.13, 0.615 - (pct / 80.0) * 0.485)
-    return max(0.05, 0.13 - ((pct - 80) / 20.0) * 0.08)
+    """Map usage percentage to per-frame timer interval for robot animation."""
+    return _robot_duration_for_pct(pct) / ROBOT_FRAMES_PER_DURATION
 
 # Color constants
 _BG_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.12, 0.14, 1.0)
@@ -711,6 +909,15 @@ def _progress_color(pct):
     elif pct >= 60:
         return _YELLOW
     return _GREEN
+
+
+def _provider_label(provider, text):
+    """Return a concise provider label used beside provider icons."""
+    if provider == "openai" and text == "Codex":
+        return "GPT/Codex"
+    if provider == "claude":
+        return f"Claude {text}"
+    return text
 
 
 def _make_text_field(text, font_size=12, color=None, bold=False, align=None):
@@ -781,6 +988,107 @@ class CardView(AppKit.NSView):
         self.layer().setBorderColor_(_CARD_BORDER_COLOR.CGColor())
         self.layer().setBorderWidth_(0.5)
         return self
+
+
+class ProviderIconView(AppKit.NSView):
+    """Small vector provider mark used to visually separate Claude and Codex."""
+
+    def initWithFrame_provider_(self, frame, provider):
+        self = objc.super(ProviderIconView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._provider = provider
+        return self
+
+    def drawRect_(self, dirty_rect):
+        bounds = self.bounds()
+        size = min(bounds.size.width, bounds.size.height)
+        cx = bounds.origin.x + bounds.size.width / 2.0
+        cy = bounds.origin.y + bounds.size.height / 2.0
+
+        if self._provider == "claude":
+            color = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.85, 0.47, 0.34, 1.0)
+            color.setFill()
+            for i in range(8):
+                spoke = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                    NSMakeRect(cx - size * 0.06, cy - size * 0.44, size * 0.12, size * 0.36),
+                    size * 0.05,
+                    size * 0.05,
+                )
+                transform = AppKit.NSAffineTransform.transform()
+                transform.translateXBy_yBy_(cx, cy)
+                transform.rotateByDegrees_(i * 45)
+                transform.translateXBy_yBy_(-cx, -cy)
+                spoke.transformUsingAffineTransform_(transform)
+                spoke.fill()
+            core = AppKit.NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(cx - size * 0.12, cy - size * 0.12, size * 0.24, size * 0.24)
+            )
+            core.fill()
+            return
+
+        bg = AppKit.NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(cx - size * 0.46, cy - size * 0.46, size * 0.92, size * 0.92)
+        )
+        AppKit.NSColor.whiteColor().setFill()
+        bg.fill()
+
+        AppKit.NSColor.blackColor().setStroke()
+        for i in range(6):
+            petal = AppKit.NSBezierPath.bezierPath()
+            petal.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
+                NSPoint(cx, cy - size * 0.15),
+                size * 0.20,
+                210,
+                40,
+                False,
+            )
+            transform = AppKit.NSAffineTransform.transform()
+            transform.translateXBy_yBy_(cx, cy)
+            transform.rotateByDegrees_(i * 60)
+            transform.translateXBy_yBy_(-cx, -cy)
+            petal.transformUsingAffineTransform_(transform)
+            petal.setLineWidth_(1.2)
+            petal.setLineCapStyle_(1)
+            petal.stroke()
+
+
+class SectionHeaderButton(AppKit.NSButton):
+    """Header button with fixed arrow/icon/title layout to avoid text overlap."""
+
+    def initWithFrame_title_key_provider_expanded_(self, frame, title, key, provider, expanded):
+        self = objc.super(SectionHeaderButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._title_text = title
+        self._key = key
+        self._provider = provider
+        self._expanded = bool(expanded)
+        self.setTitle_("")
+        self.setBordered_(False)
+        self._build_content()
+        return self
+
+    def _build_content(self):
+        h = self.frame().size.height
+        arrow = "▼" if self._expanded else "▶"
+
+        arrow_tf = _make_text_field(arrow, font_size=12, color=_TEXT_SECONDARY)
+        arrow_tf.setFrame_(NSMakeRect(6, (h - 16) / 2, 16, 16))
+        self.addSubview_(arrow_tf)
+
+        x = 26
+        if self._provider:
+            icon = ProviderIconView.alloc().initWithFrame_provider_(
+                NSMakeRect(x, (h - 15) / 2, 15, 15),
+                self._provider,
+            )
+            self.addSubview_(icon)
+            x += 20
+
+        title_tf = _make_text_field(self._title_text, font_size=11, color=_TEXT_SECONDARY, bold=True)
+        title_tf.setFrame_(NSMakeRect(x, (h - 18) / 2, self.frame().size.width - x - 8, 18))
+        self.addSubview_(title_tf)
 
 
 class HistoryBarView(AppKit.NSView):
@@ -865,7 +1173,7 @@ def _add_to_card(card, subview, x, y):
     card.addSubview_(subview)
 
 
-def _build_progress_section(label_text, pct, reset_text=None, is_estimate=False):
+def _build_progress_section(label_text, pct, reset_text=None, is_estimate=False, provider=None):
     """Build a card with label, progress bar, percentage, and optional reset time."""
     card_inner_w = POPOVER_WIDTH - 2 * CARD_INSET - 2 * CARD_PADDING
     bar_height = 8
@@ -878,10 +1186,18 @@ def _build_progress_section(label_text, pct, reset_text=None, is_estimate=False)
 
     # Label
     suffix = " (예상)" if is_estimate else ""
+    y -= 14
+    label_x = 0
+    if provider:
+        icon = ProviderIconView.alloc().initWithFrame_provider_(
+            NSMakeRect(CARD_PADDING, y + CARD_PADDING, 13, 13),
+            provider,
+        )
+        card.addSubview_(icon)
+        label_x = 16
     lbl = _make_text_field(label_text + suffix, font_size=11, color=_TEXT_SECONDARY)
     lbl.sizeToFit()
-    y -= 14
-    _add_to_card(card, lbl, 0, y)
+    _add_to_card(card, lbl, label_x, y)
 
     # Progress bar
     color = _progress_color(pct)
@@ -1598,6 +1914,104 @@ class UsageTracker:
         return result
 
 
+class CodexUsageTracker:
+    """Read Codex CLI local session logs for the latest rate-limit snapshot."""
+
+    def __init__(self, codex_dir=None):
+        self.codex_dir = Path(codex_dir) if codex_dir else CODEX_DIR
+        self.sessions_dir = self.codex_dir / "sessions"
+
+    def _jsonl_files(self):
+        if not self.sessions_dir.exists():
+            return []
+        try:
+            return sorted(
+                self.sessions_dir.rglob("*.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return []
+
+    def _parse_ts(self, raw):
+        if raw is None:
+            return None
+        try:
+            if isinstance(raw, (int, float)):
+                return datetime.fromtimestamp(raw, tz=timezone.utc).astimezone().replace(tzinfo=None)
+            text = str(raw).replace("Z", "+00:00")
+            return datetime.fromisoformat(text).astimezone().replace(tzinfo=None)
+        except (ValueError, TypeError, OSError):
+            return None
+
+    def _parse_reset_epoch(self, raw):
+        try:
+            if raw is None:
+                return None
+            return datetime.fromtimestamp(float(raw))
+        except (TypeError, ValueError, OSError):
+            return None
+
+    def _snapshot_from_event(self, event):
+        payload = event.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
+            return None
+
+        rate_limits = payload.get("rate_limits")
+        if not isinstance(rate_limits, dict):
+            return None
+
+        primary = rate_limits.get("primary") or {}
+        secondary = rate_limits.get("secondary") or {}
+        info = payload.get("info") or {}
+        total_usage = info.get("total_token_usage") or {}
+        last_usage = info.get("last_token_usage") or {}
+
+        return {
+            "available": True,
+            "timestamp": self._parse_ts(event.get("timestamp")),
+            "session_pct": float(primary.get("used_percent") or 0),
+            "session_reset": self._parse_reset_epoch(primary.get("resets_at")),
+            "session_window_minutes": primary.get("window_minutes"),
+            "week_pct": float(secondary.get("used_percent") or 0),
+            "week_reset": self._parse_reset_epoch(secondary.get("resets_at")),
+            "week_window_minutes": secondary.get("window_minutes"),
+            "plan_type": rate_limits.get("plan_type"),
+            "total_tokens": int(total_usage.get("total_tokens") or 0),
+            "input_tokens": int(total_usage.get("input_tokens") or 0),
+            "output_tokens": int(total_usage.get("output_tokens") or 0),
+            "cached_input_tokens": int(total_usage.get("cached_input_tokens") or 0),
+            "reasoning_output_tokens": int(total_usage.get("reasoning_output_tokens") or 0),
+            "last_tokens": int(last_usage.get("total_tokens") or 0),
+        }
+
+    def latest_usage(self):
+        latest = None
+        for fp in self._jsonl_files():
+            try:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        if not line.strip():
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        snapshot = self._snapshot_from_event(event)
+                        if not snapshot:
+                            continue
+                        snapshot["source_path"] = str(fp)
+                        ts = snapshot.get("timestamp")
+                        if latest is None or (ts and (latest.get("timestamp") is None or ts > latest["timestamp"])):
+                            latest = snapshot
+            except (PermissionError, FileNotFoundError, OSError):
+                continue
+
+        if latest:
+            return latest
+        return {"available": False}
+
+
 # ─── Plan recommendation ────────────────────────────────────────────────────
 
 # Claude subscription plans: (name, monthly_price_usd, session_limit, week_limit, description)
@@ -1734,6 +2148,73 @@ def _fmt_reset(dt):
     return dt.strftime("%b %-d, %-I%p").lower().replace("am", "am").replace("pm", "pm") + f" ({tz_name})"
 
 
+def _codex_section_summary(codex_usage):
+    """Return display strings for the local Codex usage section."""
+    if not codex_usage or not codex_usage.get("available"):
+        return None
+
+    sess_pct = float(codex_usage.get("session_pct") or 0)
+    week_pct = float(codex_usage.get("week_pct") or 0)
+    rows = []
+
+    plan_type = codex_usage.get("plan_type")
+    if plan_type:
+        rows.append(("플랜", str(plan_type)))
+
+    total_tokens = codex_usage.get("total_tokens")
+    if total_tokens:
+        rows.append(("총 토큰", fmt_tokens(total_tokens)))
+
+    last_tokens = codex_usage.get("last_tokens")
+    if last_tokens:
+        rows.append(("마지막 요청", fmt_tokens(last_tokens)))
+
+    timestamp = codex_usage.get("timestamp")
+    if timestamp:
+        rows.append(("업데이트", timestamp.strftime("%m/%d %-I:%M%p").lower()))
+
+    return {
+        "title": f"{_provider_label('openai', 'Codex')}  {sess_pct:.0f}% / {week_pct:.0f}%",
+        "session_pct": sess_pct,
+        "week_pct": week_pct,
+        "rows": rows,
+    }
+
+
+def _combined_robot_usage_pct(data):
+    """Use the higher Claude or Codex session percentage for the robot animation."""
+    claude_pct = float(data.get("sess_pct") or 0)
+    codex_usage = data.get("codex_usage") or {}
+    if not codex_usage.get("available"):
+        return claude_pct
+    codex_pct = float(codex_usage.get("session_pct") or 0)
+    return max(claude_pct, codex_pct)
+
+
+def _title_data_for_config(data):
+    """Build title formatting data from either Claude or Codex usage."""
+    config = data["config"]
+    title_source = config.get("title_source", "claude")
+    if title_source == "codex":
+        codex_usage = data.get("codex_usage") or {}
+        if codex_usage.get("available"):
+            return {
+                "title_mode": config.get("title_display", "session"),
+                "title_source": "codex",
+                "sess_pct": float(codex_usage.get("session_pct") or 0),
+                "week_pct": float(codex_usage.get("week_pct") or 0),
+                "api_stale": False,
+            }
+
+    return {
+        "title_mode": config.get("title_display", "session"),
+        "title_source": "claude",
+        "sess_pct": data["sess_pct"],
+        "week_pct": data["week_pct"],
+        "api_stale": (data["api_stale"] or not data["api_ok"]),
+    }
+
+
 # ─── Menu Bar App ────────────────────────────────────────────────────────────
 
 class ClaudeUsageApp(rumps.App):
@@ -1742,6 +2223,7 @@ class ClaudeUsageApp(rumps.App):
         initial_title = _format_title_from_data(snapshot) if snapshot else "⚡ Claude"
         super().__init__(name="Claude Usage", title=initial_title, quit_button=None)
         self.tracker = UsageTracker()
+        self.codex_tracker = CodexUsageTracker()
         self.view_mode = "dashboard"
         self._alerted = {"session": set(), "week": set()}
         self._last_reset = {"session": None, "week": None}
@@ -1756,6 +2238,7 @@ class ClaudeUsageApp(rumps.App):
         self._section_headers = {}
         self._pending_section_anchor = None
         self._collapse_state = {
+            "codex": False,
             "detail": False,
             "model": False,
             "history": False,
@@ -1770,11 +2253,28 @@ class ClaudeUsageApp(rumps.App):
         self._anim_static = None
         self._anim_index = 0
         self._anim_timer = None
-        self._anim_interval = 2.0
+        self._anim_interval = _anim_interval_for_pct(0)
         self._anim_pct = 0
+        self._anim_provider = _title_badge_provider_for_config(_load_config())
         self._last_title_snapshot = snapshot
         # Minimal fallback menu (quit only)
         self.menu.add(rumps.MenuItem("종료", callback=rumps.quit_application))
+
+    def _set_status_title(self, title_data):
+        """Set menu bar usage text with provider badge between icon and text."""
+        title_text = _format_title_from_data(title_data)
+        try:
+            button = self._nsapp.nsstatusitem.button()
+            if button:
+                try:
+                    button.setImagePosition_(AppKit.NSImageLeft)
+                except Exception:
+                    pass
+                button.setTitle_(title_text)
+                return
+        except Exception as e:
+            print(f"[TITLE] attributed title error: {e}", flush=True)
+        self.title = title_text
 
     @rumps.timer(1)
     def _initial_load(self, timer):
@@ -1787,7 +2287,7 @@ class ClaudeUsageApp(rumps.App):
             pass
 
         if self._last_title_snapshot:
-            self.title = _format_title_from_data(self._last_title_snapshot)
+            self._set_status_title(self._last_title_snapshot)
 
         # Set up NSPopover
         try:
@@ -1814,11 +2314,10 @@ class ClaudeUsageApp(rumps.App):
         self._register_wake_observer()
         # Initialize animation frames
         try:
-            self._walk_frames = _create_runner_frames(_WALK_FRAMES_DATA)
-            self._run_frames = _create_runner_frames(_RUN_FRAMES_DATA)
-            self._anim_frames = self._walk_frames
-            self._anim_static = _create_static_runner()
-            print("[ANIM] Walk/run frames created", flush=True)
+            self._anim_provider = _title_badge_provider_for_config(_load_config())
+            self._anim_frames = _create_robot_frames(self._anim_pct, provider=self._anim_provider)
+            self._anim_static = _create_robot_frame(0, self._anim_pct, provider=self._anim_provider)
+            print("[ANIM] Robot frames created", flush=True)
         except Exception as e:
             print(f"[ANIM] Frame creation failed: {e}", flush=True)
 
@@ -1854,6 +2353,10 @@ class ClaudeUsageApp(rumps.App):
             if self._anim_static:
                 try:
                     button = self._nsapp.nsstatusitem.button()
+                    try:
+                        button.setImagePosition_(AppKit.NSImageLeft)
+                    except Exception:
+                        pass
                     button.setImage_(self._anim_static)
                 except Exception as e:
                     print(f"[ANIM] static icon error: {e}", flush=True)
@@ -1861,6 +2364,10 @@ class ClaudeUsageApp(rumps.App):
         # Set initial frame immediately
         try:
             button = self._nsapp.nsstatusitem.button()
+            try:
+                button.setImagePosition_(AppKit.NSImageLeft)
+            except Exception:
+                pass
             button.setImage_(self._anim_frames[0])
             print(f"[ANIM] Started animation, interval={self._anim_interval:.2f}s", flush=True)
         except Exception as e:
@@ -1881,29 +2388,30 @@ class ClaudeUsageApp(rumps.App):
         try:
             self._anim_index = (self._anim_index + 1) % len(self._anim_frames)
             button = self._nsapp.nsstatusitem.button()
+            try:
+                button.setImagePosition_(AppKit.NSImageLeft)
+            except Exception:
+                pass
             button.setImage_(self._anim_frames[self._anim_index])
         except Exception as e:
             print(f"[ANIM] tick error: {e}", flush=True)
 
     def _update_anim_speed(self, pct):
-        """Update animation speed and mode based on usage percentage.
-        Switches between walk/run framesets at 80% (hysteresis: back to walk at 75%).
-        """
+        """Update robot animation speed and color based on usage percentage."""
         new_interval = _anim_interval_for_pct(pct)
-        # Hysteresis: once running, keep running until pct drops below LOW threshold
-        if self._anim_mode == "walk":
-            new_mode = "run" if pct >= RUN_THRESHOLD_HIGH else "walk"
-        else:
-            new_mode = "walk" if pct < RUN_THRESHOLD_LOW else "run"
-
-        mode_changed = new_mode != self._anim_mode
+        provider = _title_badge_provider_for_config(_load_config())
+        pct_changed = abs(float(pct) - float(self._anim_pct)) >= 1
+        provider_changed = provider != self._anim_provider
         interval_changed = abs(new_interval - self._anim_interval) / max(self._anim_interval, 0.01) > 0.1
 
-        if mode_changed:
-            self._anim_mode = new_mode
-            self._anim_frames = self._run_frames if new_mode == "run" else self._walk_frames
+        if pct_changed or provider_changed:
+            self._anim_provider = provider
+            self._anim_frames = _create_robot_frames(pct, provider=provider)
+            self._anim_static = _create_robot_frame(0, pct, provider=provider)
+            if self._anim_frames:
+                self._anim_index %= len(self._anim_frames)
 
-        if mode_changed or interval_changed:
+        if pct_changed or provider_changed or interval_changed:
             old = self._anim_interval
             self._anim_interval = new_interval
             self._anim_pct = pct
@@ -1912,7 +2420,7 @@ class ClaudeUsageApp(rumps.App):
                 self._stop_animation()
                 self._anim_timer = rumps.Timer(self._on_anim_tick, self._anim_interval)
                 self._anim_timer.start()
-                print(f"[ANIM] mode={new_mode} {old:.2f}s -> {new_interval:.2f}s (pct={pct:.0f}%)", flush=True)
+                print(f"[ANIM] robot {old:.2f}s -> {new_interval:.2f}s (pct={pct:.0f}%)", flush=True)
 
     def _close_popover(self):
         """Close popover if visible."""
@@ -2055,17 +2563,12 @@ class ClaudeUsageApp(rumps.App):
         api_stale = data["api_stale"]
 
         # Update title bar
-        title_data = {
-            "title_mode": config.get("title_display", "session"),
-            "sess_pct": sess_pct,
-            "week_pct": week_pct,
-            "api_stale": (api_stale or not api_ok),
-        }
-        self.title = _format_title_from_data(title_data)
+        title_data = _title_data_for_config(data)
+        self._set_status_title(title_data)
         _save_last_title_snapshot(title_data)
 
         # Update animation speed (NSTimer — main thread only)
-        self._update_anim_speed(sess_pct)
+        self._update_anim_speed(_combined_robot_usage_pct(data))
 
         # Alerts
         self._check_alerts(sess_pct, data.get("sess_reset"),
@@ -2102,6 +2605,7 @@ class ClaudeUsageApp(rumps.App):
         api_ok = api and "five_hour" in api
 
         daily = self.tracker.daily_costs(7)
+        codex_usage = self.codex_tracker.latest_usage()
         try:
             rec = _recommend_plan(self.tracker, _api_cache)
         except Exception:
@@ -2119,6 +2623,7 @@ class ClaudeUsageApp(rumps.App):
             "week_models": week_models, "week_costs": week_costs,
             "daily": daily,
             "rec": rec,
+            "codex_usage": codex_usage,
         }
 
     def _rebuild_popover_content(self):
@@ -2159,25 +2664,25 @@ class ClaudeUsageApp(rumps.App):
 
         # 3. Session progress card
         if config.get("show_session", True):
-            est = "" if data["api_ok"] else " (예상)"
             reset_text = _fmt_reset(data["sess_reset"]) if data["sess_reset"] else None
-            card = _build_progress_section(f"Current session{est}", data["sess_pct"],
-                                           reset_text=reset_text, is_estimate=not data["api_ok"])
+            card = _build_progress_section(_provider_label("claude", "세션"), data["sess_pct"],
+                                           reset_text=reset_text, is_estimate=not data["api_ok"],
+                                           provider="claude")
             views.append((card, card.frame().size.height))
 
         # 4. Week progress card
         if config.get("show_week", True):
-            est = "" if data["api_ok"] else " (예상)"
             reset_text = _fmt_reset(data["week_reset"]) if data["week_reset"] else None
-            card = _build_progress_section(f"Current week (all models){est}", data["week_pct"],
-                                           reset_text=reset_text, is_estimate=not data["api_ok"])
+            card = _build_progress_section(_provider_label("claude", "주간 전체"), data["week_pct"],
+                                           reset_text=reset_text, is_estimate=not data["api_ok"],
+                                           provider="claude")
             views.append((card, card.frame().size.height))
 
         # 5. Sonnet progress card
         if config.get("show_sonnet", True) and data["sonnet_pct"] is not None:
             reset_text = _fmt_reset(data["sonnet_reset"]) if data["sonnet_reset"] else None
-            card = _build_progress_section("Current week (Sonnet only)", data["sonnet_pct"],
-                                           reset_text=reset_text)
+            card = _build_progress_section(_provider_label("claude", "주간 Sonnet"), data["sonnet_pct"],
+                                           reset_text=reset_text, provider="claude")
             views.append((card, card.frame().size.height))
 
         # 6. Separator
@@ -2186,32 +2691,34 @@ class ClaudeUsageApp(rumps.App):
         sep.layer().setBackgroundColor_(_SEPARATOR_COLOR.CGColor())
         views.append((sep, 1))
 
-        # 7. Detail usage (collapsible)
+        # 7. Codex local usage (collapsible)
+        views.extend(self._build_codex_section(data, card_w, card_inner_w))
+        # 8. Claude detail usage (collapsible)
         views.extend(self._build_detail_section(data, card_w, card_inner_w))
-        # 8. Model breakdown (collapsible)
+        # 9. Claude model breakdown (collapsible)
         views.extend(self._build_model_section(data, card_w, card_inner_w))
-        # 9. 7-day history (collapsible)
+        # 10. Claude 7-day history (collapsible)
         views.extend(self._build_history_section(data, card_w, card_inner_w))
-        # 10. Plan recommendation (collapsible)
+        # 11. Claude plan recommendation (collapsible)
         views.extend(self._build_plan_section(data, card_w, card_inner_w))
 
-        # 11. Separator
+        # 12. Separator
         sep2 = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, card_w, 1))
         sep2.setWantsLayer_(True)
         sep2.layer().setBackgroundColor_(_SEPARATOR_COLOR.CGColor())
         views.append((sep2, 1))
 
-        # 12. Settings (inline, toggled)
+        # 13. Settings (inline, toggled)
         if self._settings_visible:
             views.extend(self._build_settings_views(data, card_w, card_inner_w))
 
-        # 13. Update notice
+        # 14. Update notice
         new_ver, release_url = _check_update()
         if new_ver:
             update_card = self._build_update_card(new_ver, release_url, card_w, card_inner_w)
             views.append((update_card, update_card.frame().size.height))
 
-        # 14. Footer
+        # 15. Footer
         footer = self._build_footer(card_w)
         views.append((footer, footer.frame().size.height))
 
@@ -2295,13 +2802,15 @@ class ClaudeUsageApp(rumps.App):
     def _make_section_header(self, title, key, card_w):
         """Create a clickable header for a collapsible section."""
         expanded = self._collapse_state.get(key, False)
-        arrow = "▼" if expanded else "▶"
-        btn = HoverButton.alloc().initWithFrame_(NSMakeRect(0, 0, card_w, 24))
-        btn.setTitle_(f" {arrow}  {title}")
-        btn.setFont_(AppKit.NSFont.systemFontOfSize_(11))
-        btn.setAlignment_(AppKit.NSTextAlignmentLeft)
-        btn.setBordered_(False)
-        btn.setContentTintColor_(_TEXT_SECONDARY)
+        header_h = 30 if key in ("codex", "detail", "model", "history", "plan") else 24
+        provider = "openai" if key == "codex" else ("claude" if key in ("detail", "model", "history", "plan") else None)
+        btn = SectionHeaderButton.alloc().initWithFrame_title_key_provider_expanded_(
+            NSMakeRect(0, 0, card_w, header_h),
+            title,
+            key,
+            provider,
+            expanded,
+        )
         self._section_headers[key] = btn
 
         def toggle():
@@ -2315,11 +2824,81 @@ class ClaudeUsageApp(rumps.App):
         self._action_refs.append(toggler)
         return btn
 
+    def _build_codex_section(self, data, card_w, card_inner_w):
+        """Build local Codex usage as a separate compact section."""
+        views = []
+        summary = _codex_section_summary(data.get("codex_usage"))
+        if not summary:
+            return views
+
+        header = self._make_section_header(summary["title"], "codex", card_w)
+        views.append((header, header.frame().size.height))
+
+        if not self._collapse_state.get("codex", False):
+            return views
+
+        codex_usage = data["codex_usage"]
+        line_h = 15
+        bar_h = 5
+        rows = summary["rows"]
+        total_h = 14 + bar_h + 8 + 14 + bar_h + 8 + max(1, len(rows)) * line_h
+        card = _build_card(total_h)
+        y = total_h
+
+        for label, pct, reset_key in [
+            ("세션", summary["session_pct"], "session_reset"),
+            ("주간", summary["week_pct"], "week_reset"),
+        ]:
+            y -= 14
+            tf_left = _make_text_field(label, font_size=10, color=_TEXT_PRIMARY, bold=True)
+            tf_left.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w * 0.5, 14))
+            card.addSubview_(tf_left)
+
+            reset = codex_usage.get(reset_key)
+            right = f"{pct:.0f}%"
+            if reset:
+                right += f" · {_fmt_reset(reset)}"
+            tf_right = _make_text_field(right, font_size=9, color=_TEXT_SECONDARY)
+            tf_right.setAlignment_(AppKit.NSTextAlignmentRight)
+            tf_right.setFrame_(NSMakeRect(CARD_PADDING + card_inner_w * 0.5, y + CARD_PADDING,
+                                          card_inner_w * 0.5, 14))
+            card.addSubview_(tf_right)
+
+            y -= (bar_h + 2)
+            bar = ProgressBarView.alloc().initWithFrame_percentage_color_(
+                NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, bar_h),
+                pct,
+                _progress_color(pct),
+            )
+            card.addSubview_(bar)
+            y -= 6
+
+        if rows:
+            for label, value in rows:
+                y -= line_h
+                tf_left = _make_text_field(label, font_size=9, color=_TEXT_SECONDARY)
+                tf_left.setFrame_(NSMakeRect(CARD_PADDING + 8, y + CARD_PADDING,
+                                             card_inner_w * 0.45, line_h))
+                card.addSubview_(tf_left)
+                tf_right = _make_text_field(value, font_size=9, color=_TEXT_PRIMARY)
+                tf_right.setAlignment_(AppKit.NSTextAlignmentRight)
+                tf_right.setFrame_(NSMakeRect(CARD_PADDING + card_inner_w * 0.45, y + CARD_PADDING,
+                                              card_inner_w * 0.55 - 8, line_h))
+                card.addSubview_(tf_right)
+        else:
+            y -= line_h
+            tf = _make_text_field("로컬 Codex 로그 기준", font_size=9, color=_TEXT_SECONDARY)
+            tf.setFrame_(NSMakeRect(CARD_PADDING + 8, y + CARD_PADDING, card_inner_w - 16, line_h))
+            card.addSubview_(tf)
+
+        views.append((card, card.frame().size.height))
+        return views
+
     def _build_detail_section(self, data, card_w, card_inner_w):
         """Build the detail usage collapsible section."""
         views = []
-        header = self._make_section_header("📊 세부 사용량", "detail", card_w)
-        views.append((header, 24))
+        header = self._make_section_header("📊 Claude 세부 사용량", "detail", card_w)
+        views.append((header, header.frame().size.height))
 
         if not self._collapse_state.get("detail", False):
             return views
@@ -2418,8 +2997,8 @@ class ClaudeUsageApp(rumps.App):
         if not week_models:
             return views
 
-        header = self._make_section_header("🤖 모델별", "model", card_w)
-        views.append((header, 24))
+        header = self._make_section_header("🤖 Claude 모델별", "model", card_w)
+        views.append((header, header.frame().size.height))
 
         if not self._collapse_state.get("model", False):
             return views
@@ -2489,8 +3068,8 @@ class ClaudeUsageApp(rumps.App):
         total_7d = sum(costs)
         spark = make_sparkline(costs)
 
-        header = self._make_section_header(f"📈 7일  {spark}  {fmt_cost(total_7d)}", "history", card_w)
-        views.append((header, 24))
+        header = self._make_section_header(f"📈 Claude 7일  {spark}  {fmt_cost(total_7d)}", "history", card_w)
+        views.append((header, header.frame().size.height))
 
         if not self._collapse_state.get("history", False):
             return views
@@ -2534,8 +3113,8 @@ class ClaudeUsageApp(rumps.App):
         if not rec:
             return views
 
-        header = self._make_section_header("💡 플랜 추천", "plan", card_w)
-        views.append((header, 24))
+        header = self._make_section_header("💡 Claude 플랜 추천", "plan", card_w)
+        views.append((header, header.frame().size.height))
 
         if not self._collapse_state.get("plan", False):
             return views
@@ -2707,10 +3286,17 @@ class ClaudeUsageApp(rumps.App):
 
         settings_lines = []
         title_mode = config.get("title_display", "session")
+        title_source = config.get("title_source", "claude")
 
         for mode, label in [("session", "타이틀: 세션"), ("week", "타이틀: 주간"), ("both", "타이틀: 둘 다")]:
             check = "✓ " if title_mode == mode else "   "
             settings_lines.append((f"{check}{label}", mode, "title"))
+
+        settings_lines.append(None)
+
+        for source, label in [("claude", "타이틀 기준: Claude"), ("codex", "타이틀 기준: Codex")]:
+            check = "✓ " if title_source == source else "   "
+            settings_lines.append((f"{check}{label}", source, "title_source"))
 
         settings_lines.append(None)
 
@@ -2724,7 +3310,7 @@ class ClaudeUsageApp(rumps.App):
         settings_lines.append((f"{'✓ ' if alert_on else '   '}사용량 알림 (80%/90%)", "alert_enabled", "toggle"))
 
         anim_on = config.get("animation_enabled", True)
-        settings_lines.append((f"{'✓ ' if anim_on else '   '}🏃 달리기 애니메이션", "animation_enabled", "toggle"))
+        settings_lines.append((f"{'✓ ' if anim_on else '   '}로봇 애니메이션", "animation_enabled", "toggle"))
 
         total_h = len(settings_lines) * line_h
         card = _build_card(total_h)
@@ -2754,6 +3340,10 @@ class ClaudeUsageApp(rumps.App):
             if kind == "title":
                 action = _ButtonAction.alloc().initWithCallback_(
                     lambda m=key: self._set_title_display(m)
+                )
+            elif kind == "title_source":
+                action = _ButtonAction.alloc().initWithCallback_(
+                    lambda s=key: self._set_title_source(s)
                 )
             else:
                 action = _ButtonAction.alloc().initWithCallback_(
@@ -2855,15 +3445,22 @@ class ClaudeUsageApp(rumps.App):
         # Update cached config and title bar without re-fetching data
         if self._cached_data:
             self._cached_data["config"] = config
-            stale_mark = "~" if (self._cached_data.get("api_stale") or not self._cached_data.get("api_ok")) else ""
-            sess_pct = self._cached_data.get("sess_pct", 0)
-            week_pct = self._cached_data.get("week_pct", 0)
-            if mode == "week":
-                self.title = f" {stale_mark}{week_pct:.0f}%"
-            elif mode == "both":
-                self.title = f" {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
-            else:
-                self.title = f" {stale_mark}{sess_pct:.0f}%"
+            title_data = _title_data_for_config(self._cached_data)
+            self._set_status_title(title_data)
+            _save_last_title_snapshot(title_data)
+            self._update_anim_speed(_combined_robot_usage_pct(self._cached_data))
+        self._rebuild_popover_content()
+
+    def _set_title_source(self, source):
+        config = _load_config()
+        config["title_source"] = source
+        _save_config(config)
+        if self._cached_data:
+            self._cached_data["config"] = config
+            title_data = _title_data_for_config(self._cached_data)
+            self._set_status_title(title_data)
+            _save_last_title_snapshot(title_data)
+            self._update_anim_speed(_combined_robot_usage_pct(self._cached_data))
         self._rebuild_popover_content()
 
     def _toggle_config(self, key):

@@ -6,12 +6,19 @@ from tempfile import TemporaryDirectory
 from claude_menubar import (
     AppKit,
     ClaudeUsageApp,
+    CodexUsageTracker,
     LAST_TITLE_CACHE_PATH,
     _ButtonAction,
     _compute_anchor_scroll_origin,
     _configure_popover_scroll_view,
     _current_plan_price_text,
     _format_title_from_data,
+    _robot_color_components,
+    _robot_duration_for_pct,
+    _codex_section_summary,
+    _combined_robot_usage_pct,
+    _title_badge_provider_for_config,
+    _provider_label,
     _load_last_title_snapshot,
     _save_last_title_snapshot,
 )
@@ -110,6 +117,13 @@ class ClaudeUsageAppTests(unittest.TestCase):
 
         self.assertEqual(title, " ~58%")
 
+    def test_format_title_from_data_can_show_codex_prefix(self):
+        title = _format_title_from_data(
+            {"title_mode": "both", "title_source": "codex", "sess_pct": 18, "week_pct": 7}
+        )
+
+        self.assertEqual(title, " 18% | 7%")
+
     def test_configure_popover_scroll_view_enables_overlay_scroller(self):
         scroll = _FakeScrollView()
 
@@ -153,6 +167,77 @@ class ClaudeUsageAppTests(unittest.TestCase):
                 app = ClaudeUsageApp()
 
         self.assertEqual(app.title, " 77%")
+
+    def test_robot_color_matches_preview_gradient(self):
+        self.assertEqual(_robot_color_components(0), (1.0, 1.0, 1.0))
+        self.assertEqual(_robot_color_components(33), (1.0, 191 / 255, 36 / 255))
+        self.assertEqual(_robot_color_components(66), (1.0, 115 / 255, 22 / 255))
+        self.assertEqual(_robot_color_components(100), (220 / 255, 38 / 255, 38 / 255))
+
+    def test_robot_duration_matches_preview_range(self):
+        self.assertAlmostEqual(_robot_duration_for_pct(0), 2.0)
+        self.assertAlmostEqual(_robot_duration_for_pct(100), 0.35)
+
+    def test_combined_robot_usage_uses_higher_claude_or_codex_session_pct(self):
+        data = {
+            "sess_pct": 12,
+            "codex_usage": {"available": True, "session_pct": 84},
+        }
+
+        self.assertEqual(_combined_robot_usage_pct(data), 84)
+
+    def test_title_badge_provider_follows_title_source(self):
+        self.assertEqual(_title_badge_provider_for_config({"title_source": "codex"}), "openai")
+        self.assertEqual(_title_badge_provider_for_config({"title_source": "claude"}), "claude")
+
+    def test_provider_label_prefixes_product_names(self):
+        self.assertEqual(_provider_label("claude", "세션"), "Claude 세션")
+        self.assertEqual(_provider_label("openai", "Codex"), "GPT/Codex")
+
+
+class CodexUsageTrackerTests(unittest.TestCase):
+    def test_latest_usage_reads_rate_limits_from_session_logs(self):
+        with TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            session_dir = codex_dir / "sessions" / "2026" / "05" / "19"
+            session_dir.mkdir(parents=True)
+            log_path = session_dir / "rollout.jsonl"
+            log_path.write_text(
+                "\n".join([
+                    '{"timestamp":"2026-05-19T01:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":100},"last_token_usage":{"total_tokens":10}},"rate_limits":{"primary":{"used_percent":2,"window_minutes":300,"resets_at":1779182909},"secondary":{"used_percent":3,"window_minutes":10080,"resets_at":1779665079},"plan_type":"pro"}}}',
+                    '{"timestamp":"2026-05-19T02:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25},"last_token_usage":{"total_tokens":15}},"rate_limits":{"primary":{"used_percent":4,"window_minutes":300,"resets_at":1779186509},"secondary":{"used_percent":6,"window_minutes":10080,"resets_at":1779668679},"plan_type":"pro"}}}',
+                ]),
+                encoding="utf-8",
+            )
+
+            usage = CodexUsageTracker(codex_dir=codex_dir).latest_usage()
+
+        self.assertTrue(usage["available"])
+        self.assertEqual(usage["session_pct"], 4)
+        self.assertEqual(usage["week_pct"], 6)
+        self.assertEqual(usage["plan_type"], "pro")
+        self.assertEqual(usage["total_tokens"], 25)
+
+    def test_latest_usage_reports_unavailable_without_token_count_logs(self):
+        with TemporaryDirectory() as tmpdir:
+            usage = CodexUsageTracker(codex_dir=Path(tmpdir)).latest_usage()
+
+        self.assertFalse(usage["available"])
+
+    def test_codex_section_summary_uses_only_available_local_fields(self):
+        summary = _codex_section_summary({
+            "available": True,
+            "session_pct": 4.2,
+            "week_pct": 6.8,
+            "plan_type": "pro",
+            "total_tokens": 12345,
+            "last_tokens": 678,
+        })
+
+        self.assertEqual(summary["title"], "GPT/Codex  4% / 7%")
+        self.assertIn(("플랜", "pro"), summary["rows"])
+        self.assertIn(("총 토큰", "12.3K"), summary["rows"])
+        self.assertIn(("마지막 요청", "678"), summary["rows"])
 
 if __name__ == "__main__":
     unittest.main()

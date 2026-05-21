@@ -2,6 +2,11 @@
 # Claude Code Usage Monitor v2 — Setup
 set -e
 
+if [ -n "$CLAUDE_AUTO_UPDATE" ]; then
+    mkdir -p "$HOME/.claude-menubar"
+    exec >> "$HOME/.claude-menubar/update.log" 2>&1
+fi
+
 echo "⚡ Claude Code Usage Monitor 설치"
 echo ""
 
@@ -12,10 +17,15 @@ if ! command -v python3 &> /dev/null; then
 fi
 echo "✅ $(python3 --version)"
 
-# Kill existing processes and unload LaunchAgent
-pkill -9 -f claude_menubar 2>/dev/null || true
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.claude.usage-monitor.plist 2>/dev/null || true
-echo "✅ 기존 프로세스 정리 완료"
+# Kill existing processes and unload LaunchAgent.
+# Auto-update keeps the parent app alive until setup finishes, then restarts it.
+if [ -z "$CLAUDE_AUTO_UPDATE" ]; then
+    pkill -9 -f claude_menubar 2>/dev/null || true
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.claude.usage-monitor.plist 2>/dev/null || true
+    echo "✅ 기존 프로세스 정리 완료"
+else
+    echo "✅ 자동 업데이트 모드: 실행 중인 앱은 설치 후 재시작"
+fi
 
 INSTALL_DIR="$HOME/.claude-menubar"
 mkdir -p "$INSTALL_DIR"

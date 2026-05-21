@@ -30,7 +30,7 @@ except ImportError:
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.4"
+APP_VERSION = "2.1.5"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -369,12 +369,21 @@ def _auto_update_setup(new_ver):
         print(f"[UPDATE] Running setup.sh from {source_dir}...", flush=True)
         env = os.environ.copy()
         env["CLAUDE_AUTO_UPDATE"] = "1"
-        result = subprocess.run(
-            ["bash", setup_sh],
-            capture_output=True, text=True, timeout=60, env=env,
-        )
+        update_log = Path.home() / ".claude-menubar" / "update.log"
+        update_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(update_log, "a", encoding="utf-8") as log_file:
+            log_file.write(f"\n[UPDATE] Running setup.sh for {new_ver}\n")
+            log_file.flush()
+            result = subprocess.run(
+                ["bash", setup_sh],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=60,
+                env=env,
+            )
         if result.returncode != 0:
-            print(f"[UPDATE] setup.sh failed: {result.stderr}", flush=True)
+            print(f"[UPDATE] setup.sh failed, see {update_log}", flush=True)
             return False
 
         print(f"[UPDATE] Updated to {new_ver} via setup.sh", flush=True)

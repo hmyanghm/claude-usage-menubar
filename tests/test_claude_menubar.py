@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import patch
+import subprocess
+from unittest.mock import mock_open, patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -21,6 +22,8 @@ from claude_menubar import (
     _provider_label,
     _load_last_title_snapshot,
     _save_last_title_snapshot,
+    _auto_update_setup,
+    _update_cache,
 )
 
 
@@ -193,6 +196,34 @@ class ClaudeUsageAppTests(unittest.TestCase):
     def test_provider_label_prefixes_product_names(self):
         self.assertEqual(_provider_label("claude", "세션"), "Claude 세션")
         self.assertEqual(_provider_label("openai", "Codex"), "GPT/Codex")
+
+    def test_auto_update_setup_writes_setup_output_to_update_log(self):
+        old_cache = _update_cache.copy()
+        try:
+            with TemporaryDirectory() as tmpdir:
+                source_dir = Path(tmpdir) / "source"
+                source_dir.mkdir()
+                (source_dir / "setup.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+                _update_cache["latest_version"] = "v9.9.9-mac"
+
+                result = subprocess.CompletedProcess(["bash"], 0)
+                open_mock = mock_open()
+                with patch("claude_menubar._download_source_tarball", return_value=str(source_dir)), \
+                     patch("claude_menubar._send_notification"), \
+                     patch("claude_menubar._restart_app"), \
+                     patch("claude_menubar.shutil.rmtree"), \
+                     patch("builtins.open", open_mock), \
+                     patch("claude_menubar.subprocess.run", return_value=result) as run_mock:
+                    updated = _auto_update_setup("v9.9.9-mac")
+
+                self.assertTrue(updated)
+                _, kwargs = run_mock.call_args
+                self.assertNotIn("capture_output", kwargs)
+                self.assertIs(kwargs["stdout"], open_mock())
+                self.assertEqual(kwargs["stderr"], subprocess.STDOUT)
+        finally:
+            _update_cache.clear()
+            _update_cache.update(old_cache)
 
 
 class CodexUsageTrackerTests(unittest.TestCase):

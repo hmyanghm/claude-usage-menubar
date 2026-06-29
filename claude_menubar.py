@@ -31,7 +31,7 @@ except ImportError:
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -2804,6 +2804,11 @@ class ClaudeUsageApp(rumps.App):
             import threading
             def _bg_refresh():
                 try:
+                    # Fresh update check on open so a newly published release
+                    # shows up without waiting for the hourly timer. Lightly
+                    # throttled to avoid hammering the GitHub API on rapid opens.
+                    if time.time() - _update_cache["checked_at"] > 60:
+                        _check_update(force=True)
                     new_data = self._gather_data()
                     # Update on main thread (title, animation, popover)
                     from PyObjCTools import AppHelper
@@ -3704,22 +3709,33 @@ class ClaudeUsageApp(rumps.App):
         footer_h = 28
         footer = AppKit.NSView.alloc().initWithFrame_(NSMakeRect(0, 0, card_w, footer_h))
 
+        # If a newer release exists, turn the version slot into an update button.
+        new_ver, _release_url = _check_update()
+        if new_ver:
+            ver_title = f"⬆️ {new_ver.split('-')[0]}"
+            ver_callback = lambda v=new_ver: _auto_update(v)
+            ver_tint = _GREEN
+        else:
+            ver_title = f"v{APP_VERSION}"
+            ver_callback = None
+            ver_tint = _TEXT_SECONDARY
+
         btn_w = card_w / 4.0
         buttons = [
-            ("🔄", self._on_refresh_click),
-            ("⚙️", self._on_settings_click),
-            (f"v{APP_VERSION}", None),
-            ("종료", self._on_quit_click),
+            ("🔄", self._on_refresh_click, _TEXT_SECONDARY),
+            ("⚙️", self._on_settings_click, _TEXT_SECONDARY),
+            (ver_title, ver_callback, ver_tint),
+            ("종료", self._on_quit_click, _TEXT_SECONDARY),
         ]
 
-        for i, (title, callback) in enumerate(buttons):
+        for i, (title, callback, tint) in enumerate(buttons):
             btn = HoverButton.alloc().initWithFrame_(
                 NSMakeRect(i * btn_w, 0, btn_w, footer_h)
             )
             btn.setTitle_(title)
             btn.setFont_(AppKit.NSFont.systemFontOfSize_(11))
             btn.setBordered_(False)
-            btn.setContentTintColor_(_TEXT_SECONDARY)
+            btn.setContentTintColor_(tint)
 
             if callback:
                 action = _ButtonAction.alloc().initWithCallback_(callback)

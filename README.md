@@ -6,11 +6,11 @@
 ![macOS](https://img.shields.io/badge/macOS-menu%20bar-blue) ![Windows](https://img.shields.io/badge/Windows-system%20tray-0078D6) ![version](https://img.shields.io/badge/version-2.2.0-green)
 
 <p align="center">
-  <img src="screenshots/menubar-preview.png" alt="Claude Usage Monitor - 메뉴바 미리보기" width="500">
+  <img src="screenshots/menubar-title-v5.png" alt="Claude Usage Monitor - 메뉴바 타이틀" width="300">
 </p>
 
 <p align="center">
-  <img src="screenshots/main-v4.png" alt="Claude Usage Monitor" width="400">
+  <img src="screenshots/main-v5.png" alt="Claude Usage Monitor - Claude·Codex 사용량" width="420">
 </p>
 
 ---

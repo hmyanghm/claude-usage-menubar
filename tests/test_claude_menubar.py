@@ -1,5 +1,7 @@
 import unittest
 import subprocess
+import base64
+import json
 from unittest.mock import mock_open, patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,10 +12,17 @@ from claude_menubar import (
     CodexUsageTracker,
     LAST_TITLE_CACHE_PATH,
     _ButtonAction,
+    _account_label_for_config,
+    _api_status_notice,
     _compute_anchor_scroll_origin,
     _configure_popover_scroll_view,
+    _load_codex_account_label,
     _current_plan_price_text,
     _format_title_from_data,
+    _fmt_time_remaining,
+    _primary_progress_sections,
+    _title_slots_from_config,
+    _resolve_title_slots,
     _robot_color_components,
     _robot_duration_for_pct,
     _codex_section_summary,
@@ -103,29 +112,84 @@ class ClaudeUsageAppTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             cache_path = Path(tmpdir) / "last_title.json"
             _save_last_title_snapshot(
-                {"title_mode": "both", "sess_pct": 61, "week_pct": 24, "api_stale": False},
+                {"slots": [
+                    {"pct": 61, "tag": "5h", "provider": "claude"},
+                    {"pct": 24, "tag": "5h", "provider": "openai"},
+                ], "api_stale": False},
                 path=cache_path,
             )
 
             loaded = _load_last_title_snapshot(path=cache_path)
 
-        self.assertEqual(loaded["title_mode"], "both")
-        self.assertEqual(loaded["sess_pct"], 61)
-        self.assertEqual(loaded["week_pct"], 24)
+        self.assertEqual(loaded["slots"][0], {"pct": 61, "tag": "5h", "provider": "claude"})
+        self.assertEqual(loaded["slots"][1], {"pct": 24, "tag": "5h", "provider": "openai"})
+
+    def test_last_title_snapshot_loads_legacy_shape(self):
+        with TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "last_title.json"
+            cache_path.write_text(
+                '{"title_mode": "both", "title_source": "claude", '
+                '"sess_pct": 61, "week_pct": 24, "api_stale": false}',
+                encoding="utf-8",
+            )
+            loaded = _load_last_title_snapshot(path=cache_path)
+
+        # Legacy snapshot still renders through the slot formatter.
+        self.assertEqual(_format_title_from_data(loaded), " 5h 61% | 7d 24%")
 
     def test_format_title_from_data_uses_stale_prefix(self):
         title = _format_title_from_data(
-            {"title_mode": "session", "sess_pct": 58, "week_pct": 12, "api_stale": True}
+            {"slots": [{"pct": 58, "tag": "5h", "provider": "claude"}], "api_stale": True}
         )
 
-        self.assertEqual(title, " ~58%")
+        self.assertEqual(title, " ~5h 58%")
 
-    def test_format_title_from_data_can_show_codex_prefix(self):
-        title = _format_title_from_data(
-            {"title_mode": "both", "title_source": "codex", "sess_pct": 18, "week_pct": 7}
-        )
+    def test_format_title_from_data_two_slots(self):
+        title = _format_title_from_data({"slots": [
+            {"pct": 18, "tag": "5h", "provider": "openai"},
+            {"pct": 7, "tag": "7d", "provider": "openai"},
+        ]})
 
-        self.assertEqual(title, " 18% | 7%")
+        self.assertEqual(title, " 5h 18% | 7d 7%")
+
+    def test_title_slots_from_config_prefers_explicit_slots(self):
+        self.assertEqual(
+            _title_slots_from_config({"title_slots": ["claude_session", "codex_session"]}),
+            ["claude_session", "codex_session"])
+        # Unknown ids dropped, capped at 2.
+        self.assertEqual(
+            _title_slots_from_config({"title_slots": ["bogus", "codex_week", "claude_week", "claude_session"]}),
+            ["codex_week", "claude_week"])
+
+    def test_title_slots_from_config_migrates_legacy_keys(self):
+        self.assertEqual(
+            _title_slots_from_config({"title_source": "codex", "title_display": "both"}),
+            ["codex_session", "codex_week"])
+        self.assertEqual(
+            _title_slots_from_config({"title_source": "claude", "title_display": "week"}),
+            ["claude_week"])
+        self.assertEqual(_title_slots_from_config({}), ["claude_session"])
+
+    def test_resolve_title_slots_skips_unavailable_provider(self):
+        data = {
+            "config": {"title_slots": ["claude_session", "codex_session"]},
+            "sess_pct": 40, "week_pct": 10, "sonnet_pct": None,
+            "codex_usage": {"available": False},
+        }
+        slots = _resolve_title_slots(data)
+        self.assertEqual(slots, [{"pct": 40.0, "tag": "5h", "provider": "claude"}])
+
+    def test_resolve_title_slots_mixes_providers(self):
+        data = {
+            "config": {"title_slots": ["claude_session", "codex_week"]},
+            "sess_pct": 95, "week_pct": 92, "sonnet_pct": None,
+            "codex_usage": {"available": True, "session_pct": 4, "week_pct": 8},
+        }
+        slots = _resolve_title_slots(data)
+        self.assertEqual(slots, [
+            {"pct": 95.0, "tag": "5h", "provider": "claude"},
+            {"pct": 8.0, "tag": "7d", "provider": "openai"},
+        ])
 
     def test_configure_popover_scroll_view_enables_overlay_scroller(self):
         scroll = _FakeScrollView()
@@ -162,14 +226,14 @@ class ClaudeUsageAppTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             cache_path = Path(tmpdir) / "last_title.json"
             _save_last_title_snapshot(
-                {"title_mode": "session", "sess_pct": 77, "week_pct": 12, "api_stale": False},
+                {"slots": [{"pct": 77, "tag": "5h", "provider": "claude"}], "api_stale": False},
                 path=cache_path,
             )
 
             with patch("claude_menubar.LAST_TITLE_CACHE_PATH", cache_path):
                 app = ClaudeUsageApp()
 
-        self.assertEqual(app.title, " 77%")
+        self.assertEqual(app.title, " 5h 77%")
 
     def test_robot_color_matches_preview_gradient(self):
         self.assertEqual(_robot_color_components(0), (1.0, 1.0, 1.0))
@@ -196,6 +260,196 @@ class ClaudeUsageAppTests(unittest.TestCase):
     def test_provider_label_prefixes_product_names(self):
         self.assertEqual(_provider_label("claude", "세션"), "Claude 세션")
         self.assertEqual(_provider_label("openai", "Codex"), "GPT/Codex")
+
+    def test_primary_progress_sections_follow_codex_title_source_when_available(self):
+        sections = _primary_progress_sections({
+            "config": {"title_source": "codex", "show_session": True, "show_week": True},
+            "api_ok": True,
+            "sess_pct": 12,
+            "sess_reset": "claude-session-reset",
+            "week_pct": 34,
+            "week_reset": "claude-week-reset",
+            "sonnet_pct": None,
+            "sonnet_reset": None,
+            "codex_usage": {
+                "available": True,
+                "session_pct": 56,
+                "session_reset": "codex-session-reset",
+                "week_pct": 78,
+                "week_reset": "codex-week-reset",
+            },
+        })
+
+        self.assertEqual(
+            sections[:2],
+            [
+                {
+                    "label": "Codex 세션",
+                    "pct": 56,
+                    "reset": "codex-session-reset",
+                    "is_estimate": False,
+                    "provider": "openai",
+                },
+                {
+                    "label": "Codex 주간",
+                    "pct": 78,
+                    "reset": "codex-week-reset",
+                    "is_estimate": False,
+                    "provider": "openai",
+                },
+            ],
+        )
+
+    def test_primary_progress_sections_fall_back_to_claude_when_codex_unavailable(self):
+        sections = _primary_progress_sections({
+            "config": {"title_source": "codex", "show_session": True, "show_week": True},
+            "api_ok": False,
+            "sess_pct": 12,
+            "sess_reset": "claude-session-reset",
+            "week_pct": 34,
+            "week_reset": "claude-week-reset",
+            "sonnet_pct": None,
+            "sonnet_reset": None,
+            "codex_usage": {"available": False},
+        })
+
+        self.assertEqual(sections[0]["label"], "Claude 세션")
+        self.assertEqual(sections[0]["pct"], 12)
+        self.assertEqual(sections[0]["reset"], "claude-session-reset")
+        self.assertEqual(sections[0]["provider"], "claude")
+        self.assertTrue(all(s["provider"] == "claude" for s in sections))
+
+    def test_primary_progress_sections_show_both_providers_at_once(self):
+        sections = _primary_progress_sections({
+            "config": {"title_source": "claude", "show_session": True,
+                       "show_week": True, "show_sonnet": False},
+            "api_ok": True,
+            "sess_pct": 12,
+            "sess_reset": "claude-session-reset",
+            "week_pct": 34,
+            "week_reset": "claude-week-reset",
+            "sonnet_pct": None,
+            "sonnet_reset": None,
+            "codex_usage": {
+                "available": True,
+                "session_pct": 56,
+                "session_reset": "codex-session-reset",
+                "week_pct": 78,
+                "week_reset": "codex-week-reset",
+            },
+        })
+
+        providers = [s["provider"] for s in sections]
+        # Claude first (title source), then Codex — both visible together.
+        self.assertEqual(providers, ["claude", "claude", "openai", "openai"])
+
+    def test_fmt_time_remaining_formats_by_magnitude(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 6, 29, 12, 0, 0)
+        self.assertEqual(
+            _fmt_time_remaining(now + timedelta(hours=4, minutes=32), now=now),
+            "4시간 32분 남음")
+        self.assertEqual(
+            _fmt_time_remaining(now + timedelta(minutes=45), now=now),
+            "45분 남음")
+        self.assertEqual(
+            _fmt_time_remaining(now + timedelta(days=6, hours=18), now=now),
+            "6일 18시간 남음")
+        self.assertEqual(
+            _fmt_time_remaining(now - timedelta(minutes=1), now=now),
+            "곧 갱신")
+        self.assertIsNone(_fmt_time_remaining(None))
+
+    def test_fmt_time_remaining_compact_form(self):
+        from datetime import datetime, timedelta
+        now = datetime(2026, 6, 29, 12, 0, 0)
+        self.assertEqual(
+            _fmt_time_remaining(now + timedelta(hours=4, minutes=32), now=now, compact=True),
+            "4h32m")
+        self.assertEqual(
+            _fmt_time_remaining(now + timedelta(minutes=45), now=now, compact=True),
+            "45m")
+        # Day counts round up (time remaining), so 6d exactly stays 6일.
+        self.assertEqual(
+            _fmt_time_remaining(now + timedelta(days=6), now=now, compact=True),
+            "6일")
+        self.assertEqual(
+            _fmt_time_remaining(now + timedelta(days=6, hours=23), now=now, compact=True),
+            "7일")
+        self.assertEqual(
+            _fmt_time_remaining(now - timedelta(minutes=1), now=now, compact=True),
+            "곧")
+
+    def test_account_label_uses_claude_profile_for_claude_title_source(self):
+        label = _account_label_for_config(
+            {"config": {"title_source": "claude"}},
+            {"account_name": "Claude User", "account_email": "claude@example.com"},
+        )
+
+        self.assertEqual(label, "Claude User (claude@example.com)")
+
+    def test_account_label_uses_codex_profile_for_codex_title_source(self):
+        with TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            payload = base64.urlsafe_b64encode(json.dumps({
+                "name": "Codex User",
+                "email": "codex@example.com",
+            }).encode("utf-8")).decode("ascii").rstrip("=")
+            (codex_dir / "auth.json").write_text(json.dumps({
+                "tokens": {"id_token": f"header.{payload}.signature"},
+            }), encoding="utf-8")
+
+            label = _account_label_for_config(
+                {"config": {"title_source": "codex"}},
+                {"account_name": "Claude User", "account_email": "claude@example.com"},
+                codex_dir=codex_dir,
+            )
+
+        self.assertEqual(label, "Codex User (codex@example.com)")
+
+    def test_load_codex_account_label_falls_back_to_account_id(self):
+        with TemporaryDirectory() as tmpdir:
+            codex_dir = Path(tmpdir)
+            (codex_dir / "auth.json").write_text(json.dumps({
+                "tokens": {"account_id": "acct_123"},
+            }), encoding="utf-8")
+
+            label = _load_codex_account_label(codex_dir=codex_dir)
+
+        self.assertEqual(label, "acct_123")
+
+    def test_api_status_notice_shows_local_estimate_when_claude_api_unavailable(self):
+        notice = _api_status_notice({
+            "config": {"title_source": "claude"},
+            "api_ok": False,
+            "api_stale": False,
+            "sess_totals": {"total": 100},
+            "week_totals": {"total": 200},
+        })
+
+        self.assertEqual(notice, ("Claude 로컬 로그 기반 추정치", "secondary"))
+
+    def test_api_status_notice_hides_claude_api_state_for_codex_source(self):
+        notice = _api_status_notice({
+            "config": {"title_source": "codex"},
+            "api_ok": False,
+            "api_stale": False,
+            "sess_totals": {"total": 100},
+            "week_totals": {"total": 200},
+        })
+
+        self.assertIsNone(notice)
+
+    def test_api_status_notice_shows_disconnected_when_no_api_or_local_usage(self):
+        notice = _api_status_notice({
+            "config": {"title_source": "claude"},
+            "api_ok": False,
+            "api_stale": False,
+            "sess_totals": {"total": 0},
+            "week_totals": {"total": 0},
+        })
+
+        self.assertEqual(notice, ("Claude API 미연결", "warning"))
 
     def test_auto_update_setup_writes_setup_output_to_update_log(self):
         old_cache = _update_cache.copy()

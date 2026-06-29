@@ -12,6 +12,7 @@ import sys
 import glob
 import math
 import time
+import base64
 import tempfile
 import shutil
 import subprocess
@@ -30,7 +31,7 @@ except ImportError:
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.5"
+APP_VERSION = "2.2.0"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -45,8 +46,10 @@ REFRESH_INTERVAL_SEC = 300
 CONFIG_PATH = CLAUDE_DIR / "menubar_config.json"
 LAST_TITLE_CACHE_PATH = CLAUDE_DIR / "menubar_last_title.json"
 DEFAULT_CONFIG = {
-    "title_display": "session",   # "session" | "week" | "both"
-    "title_source": "claude",     # "claude" | "codex"
+    # Up to 2 menu bar title slots from TITLE_SLOT_DEFS ids. Absent by default so
+    # legacy title_source/title_display migrate cleanly for existing users.
+    "title_display": "session",   # legacy: "session" | "week" | "both"
+    "title_source": "claude",     # legacy: "claude" | "codex"
     "show_session": True,
     "show_week": True,
     "show_sonnet": True,
@@ -87,6 +90,13 @@ def _load_last_title_snapshot(path=None):
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if isinstance(data.get("slots"), list):
+            slots = [{"pct": float(s.get("pct", 0) or 0),
+                      "tag": str(s.get("tag", "")),
+                      "provider": str(s.get("provider", "claude"))}
+                     for s in data["slots"]]
+            return {"slots": slots, "api_stale": bool(data.get("api_stale", False))}
+        # Legacy snapshot shape.
         return {
             "title_mode": data.get("title_mode", "session"),
             "title_source": data.get("title_source", "claude"),
@@ -101,11 +111,12 @@ def _load_last_title_snapshot(path=None):
 def _save_last_title_snapshot(data, path=None):
     """Persist the last known title percentages for the next app launch."""
     path = path or LAST_TITLE_CACHE_PATH
+    slots = data.get("slots")
+    if slots is None:
+        slots = _legacy_title_slots(data)
     snapshot = {
-        "title_mode": data.get("title_mode", "session"),
-        "title_source": data.get("title_source", "claude"),
-        "sess_pct": round(float(data.get("sess_pct", 0))),
-        "week_pct": round(float(data.get("week_pct", 0))),
+        "slots": [{"pct": round(float(s["pct"])), "tag": s["tag"], "provider": s["provider"]}
+                  for s in slots],
         "api_stale": bool(data.get("api_stale", False)),
     }
     try:
@@ -116,17 +127,59 @@ def _save_last_title_snapshot(data, path=None):
         print(f"[CACHE] Save last title error: {e}", flush=True)
 
 
+# Menu bar title slots: (id, settings label, provider, window tag)
+TITLE_SLOT_DEFS = [
+    ("claude_session", "Claude 5시간", "claude", "5h"),
+    ("claude_week",    "Claude 주간",  "claude", "7d"),
+    ("claude_sonnet",  "Claude Sonnet", "claude", "So"),
+    ("codex_session",  "Codex 5시간",  "openai", "5h"),
+    ("codex_week",     "Codex 주간",   "openai", "7d"),
+]
+_TITLE_SLOT_META = {sid: {"label": lb, "provider": pv, "tag": tg}
+                    for sid, lb, pv, tg in TITLE_SLOT_DEFS}
+
+
+def _title_slots_from_config(config):
+    """Return up to 2 configured title slot ids, migrating legacy keys."""
+    slots = config.get("title_slots")
+    if isinstance(slots, list):
+        valid = [s for s in slots if s in _TITLE_SLOT_META][:2]
+        if valid:
+            return valid
+    # Legacy migration from title_source + title_display.
+    prefix = "codex" if config.get("title_source") == "codex" else "claude"
+    disp = config.get("title_display", "session")
+    if disp == "week":
+        return [f"{prefix}_week"]
+    if disp == "both":
+        return [f"{prefix}_session", f"{prefix}_week"]
+    return [f"{prefix}_session"]
+
+
+def _legacy_title_slots(data):
+    """Build slot dicts from the old title_mode/title_source snapshot shape."""
+    provider = "openai" if data.get("title_source") == "codex" else "claude"
+    sess = float(data.get("sess_pct", 0) or 0)
+    week = float(data.get("week_pct", 0) or 0)
+    mode = data.get("title_mode", "session")
+    if mode == "week":
+        return [{"pct": week, "tag": "7d", "provider": provider}]
+    if mode == "both":
+        return [{"pct": sess, "tag": "5h", "provider": provider},
+                {"pct": week, "tag": "7d", "provider": provider}]
+    return [{"pct": sess, "tag": "5h", "provider": provider}]
+
+
 def _format_title_from_data(data):
-    """Format the menu bar title from usage percentages."""
+    """Format the plain menu bar title text from resolved slots."""
     stale_mark = "~" if data.get("api_stale") else ""
-    title_mode = data.get("title_mode", "session")
-    sess_pct = data.get("sess_pct", 0)
-    week_pct = data.get("week_pct", 0)
-    if title_mode == "week":
-        return f" {stale_mark}{week_pct:.0f}%"
-    if title_mode == "both":
-        return f" {stale_mark}{sess_pct:.0f}% | {week_pct:.0f}%"
-    return f" {stale_mark}{sess_pct:.0f}%"
+    slots = data.get("slots")
+    if slots is None:
+        slots = _legacy_title_slots(data)
+    if not slots:
+        return " 0%"
+    parts = [f"{s['tag']} {s['pct']:.0f}%" for s in slots]
+    return f" {stale_mark}" + " | ".join(parts)
 
 
 def _configure_popover_scroll_view(scroll):
@@ -904,6 +957,12 @@ _YELLOW = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.84, 0.0
 _RED = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.271, 0.227, 1.0)       # #FF453A
 _SEPARATOR_COLOR = AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.08)
 
+# Per-provider color used to tint each menu bar title segment (color = provider).
+_TITLE_PROVIDER_COLOR = {
+    "claude": AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.96, 0.55, 0.30, 1.0),
+    "openai": AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.35, 0.66, 1.0, 1.0),
+}
+
 POPOVER_WIDTH = 320
 CARD_INSET = 12       # horizontal padding inside popover
 CARD_PADDING = 10     # padding inside cards
@@ -927,6 +986,87 @@ def _provider_label(provider, text):
     if provider == "claude":
         return f"Claude {text}"
     return text
+
+
+def _format_account_label(name=None, email=None):
+    """Return a compact account label from optional profile fields."""
+    if name and email:
+        return f"{name} ({email})"
+    return email or name
+
+
+def _decode_jwt_payload(token):
+    """Decode an unsigned JWT payload for local display metadata only."""
+    try:
+        parts = str(token).split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1]
+        payload += "=" * ((4 - len(payload) % 4) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+
+
+def _load_codex_account_label(codex_dir=None):
+    """Read the local Codex auth profile label without exposing token values."""
+    auth_path = (Path(codex_dir) if codex_dir else CODEX_DIR) / "auth.json"
+    try:
+        with open(auth_path, "r", encoding="utf-8") as f:
+            auth = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError, OSError):
+        return None
+
+    tokens = auth.get("tokens") or {}
+    payload = _decode_jwt_payload(tokens.get("id_token"))
+    label = _format_account_label(payload.get("name"), payload.get("email"))
+    if label:
+        return label
+
+    return tokens.get("account_id")
+
+
+def _account_label_for_config(data, api_cache=None, codex_dir=None):
+    """Return the account label for the currently selected title source."""
+    config = data.get("config") or {}
+    if config.get("title_source") == "codex":
+        return _load_codex_account_label(codex_dir=codex_dir)
+
+    api_cache = api_cache or _api_cache
+    return _format_account_label(api_cache.get("account_name"), api_cache.get("account_email"))
+
+
+def _has_local_claude_usage(data):
+    """Return whether local Claude logs contain usage usable for estimates."""
+    for key in ("sess_totals", "week_totals", "today_totals"):
+        totals = data.get(key) or {}
+        if float(totals.get("total") or 0) > 0:
+            return True
+        if float(totals.get("cost") or 0) > 0:
+            return True
+        if int(totals.get("requests") or 0) > 0:
+            return True
+    return False
+
+
+def _api_status_notice(data, api_cache=None, now=None):
+    """Return optional API status text and tone for the selected source."""
+    config = data.get("config") or {}
+    if config.get("title_source") == "codex":
+        return None
+
+    if data.get("api_ok"):
+        if data.get("api_stale"):
+            api_cache = api_cache or _api_cache
+            now = time.time() if now is None else now
+            ago = int(now - api_cache.get("fetched_at", now))
+            return f"캐시 데이터 ({ago}초 전)", "secondary"
+        return None
+
+    if _has_local_claude_usage(data):
+        return "Claude 로컬 로그 기반 추정치", "secondary"
+
+    return "Claude API 미연결", "warning"
 
 
 def _make_text_field(text, font_size=12, color=None, bold=False, align=None):
@@ -1182,58 +1322,72 @@ def _add_to_card(card, subview, x, y):
     card.addSubview_(subview)
 
 
-def _build_progress_section(label_text, pct, reset_text=None, is_estimate=False, provider=None):
-    """Build a card with label, progress bar, percentage, and optional reset time."""
-    card_inner_w = POPOVER_WIDTH - 2 * CARD_INSET - 2 * CARD_PADDING
-    bar_height = 8
-    elements_height = 16 + INNER_SPACING + bar_height + INNER_SPACING + 14
-    if reset_text:
-        elements_height += INNER_SPACING + 12
-    card = _build_card(elements_height)
+def _build_compact_progress_card(sections, card_inner_w):
+    """Build one card with a compact single-line row per metric.
 
-    y = elements_height  # Build top-down, place bottom-up
+    Each row: provider icon · label · thin bar · percentage · time-left.
+    Keeps Claude+Codex visible together without growing the popover much.
+    """
+    row_h = 16
+    row_gap = 9
+    n = max(1, len(sections))
+    total_h = n * row_h + (n - 1) * row_gap
+    card = _build_card(total_h)
 
-    # Label
-    suffix = " (예상)" if is_estimate else ""
-    y -= 14
-    label_x = 0
-    if provider:
-        icon = ProviderIconView.alloc().initWithFrame_provider_(
-            NSMakeRect(CARD_PADDING, y + CARD_PADDING, 13, 13),
-            provider,
+    # Column geometry within the card's inner width. Provider is shown by the
+    # row icon, so the text label only carries the window (세션/주간/Sonnet) and
+    # the bar stretches to fill the freed space instead of leaving it empty.
+    label_x = 17           # after a 13px provider icon + gap
+    label_w = 48
+    gap = 6
+    pct_w = 40
+    time_w = 46
+    bar_x = label_x + label_w + gap
+    time_x = card_inner_w - time_w
+    pct_x = time_x - 4 - pct_w
+    bar_w = pct_x - gap - bar_x
+    bar_h = 8
+
+    y = total_h
+    for i, section in enumerate(sections):
+        if i > 0:
+            y -= row_gap  # gap between rows; without this the gaps pile up as empty space at the bottom
+        y -= row_h
+        base_y = y + CARD_PADDING
+        pct = section["pct"]
+        color = _progress_color(pct)
+
+        if section.get("provider"):
+            icon = ProviderIconView.alloc().initWithFrame_provider_(
+                NSMakeRect(CARD_PADDING, base_y + (row_h - 13) / 2, 13, 13),
+                section["provider"],
+            )
+            card.addSubview_(icon)
+
+        window_label = section["label"].split(" ", 1)[-1]
+        lbl = _make_text_field(window_label, font_size=11, color=_TEXT_SECONDARY)
+        lbl.setFrame_(NSMakeRect(CARD_PADDING + label_x, base_y, label_w, row_h))
+        card.addSubview_(lbl)
+
+        bar = ProgressBarView.alloc().initWithFrame_percentage_color_(
+            NSMakeRect(CARD_PADDING + bar_x, base_y + (row_h - bar_h) / 2, bar_w, bar_h),
+            pct, color,
         )
-        card.addSubview_(icon)
-        label_x = 16
-    lbl = _make_text_field(label_text + suffix, font_size=11, color=_TEXT_SECONDARY)
-    lbl.sizeToFit()
-    _add_to_card(card, lbl, label_x, y)
+        card.addSubview_(bar)
 
-    # Progress bar
-    color = _progress_color(pct)
-    y -= (INNER_SPACING + bar_height)
-    bar = ProgressBarView.alloc().initWithFrame_percentage_color_(
-        NSMakeRect(0, 0, card_inner_w, bar_height), pct, color
-    )
-    _add_to_card(card, bar, 0, y)
+        suffix = "*" if section.get("is_estimate") else ""
+        pct_tf = _make_text_field(f"{pct:.0f}%{suffix}", font_size=11, color=color, bold=True,
+                                  align=AppKit.NSTextAlignmentRight)
+        pct_tf.setFrame_(NSMakeRect(CARD_PADDING + pct_x, base_y, pct_w, row_h))
+        card.addSubview_(pct_tf)
 
-    # Percentage text (right-aligned)
-    pct_text = f"{pct:.0f}%"
-    pct_tf = _make_text_field(pct_text, font_size=13, color=color, bold=True)
-    pct_tf.sizeToFit()
-    pct_w = pct_tf.frame().size.width
-    y -= (INNER_SPACING + 14)
-    pct_tf.setFrame_(NSMakeRect(
-        CARD_PADDING + card_inner_w - pct_w,
-        y + CARD_PADDING,
-        pct_w, 14
-    ))
-    card.addSubview_(pct_tf)
-
-    # Reset time (if available)
-    if reset_text:
-        reset_tf = _make_text_field(f"Resets {reset_text}", font_size=10, color=_TEXT_SECONDARY)
-        reset_tf.sizeToFit()
-        _add_to_card(card, reset_tf, 0, y - INNER_SPACING - 12)
+        if section.get("reset"):
+            remaining = _fmt_time_remaining(section["reset"], compact=True)
+            if remaining:
+                t_tf = _make_text_field(f"↻{remaining}", font_size=9, color=_TEXT_SECONDARY,
+                                        align=AppKit.NSTextAlignmentRight)
+                t_tf.setFrame_(NSMakeRect(CARD_PADDING + time_x, base_y, time_w, row_h))
+                card.addSubview_(t_tf)
 
     return card
 
@@ -1291,6 +1445,29 @@ class _ButtonAction(NSObject):
             except Exception as e:
                 import traceback
                 print(f"[ACTION] callback raised: {e}\n{traceback.format_exc()}", flush=True)
+
+
+class _NotificationObserver(NSObject):
+    """NSObject observer that forwards a notification to a Python callback.
+
+    rumps.App is a plain Python object and cannot be an NSNotificationCenter
+    observer, so a dedicated ObjC object is required.
+    """
+
+    def initWithCallback_(self, callback):
+        self = objc.super(_NotificationObserver, self).init()
+        if self is None:
+            return None
+        self._callback = callback
+        return self
+
+    @objc.typedSelector(b"v@:@")
+    def handle_(self, notification):
+        if self._callback:
+            try:
+                self._callback()
+            except Exception as e:
+                print(f"[HOVER] scroll sync error: {e}", flush=True)
 
 
 class PopoverViewController(AppKit.NSViewController):
@@ -1352,6 +1529,22 @@ class HoverButton(AppKit.NSButton):
 
     def mouseExited_(self, event):
         self._setHoverState_(False)
+
+    def syncHoverToMouse(self):
+        """Re-evaluate hover from the real mouse position (called on scroll).
+
+        Scrolling moves the view under a stationary cursor without firing
+        mouseExited, which otherwise leaves buttons stuck highlighted.
+        """
+        win = self.window()
+        if win is None:
+            if self._hovered:
+                self._setHoverState_(False)
+            return
+        local = self.convertPoint_fromView_(win.mouseLocationOutsideOfEventStream(), None)
+        inside = bool(AppKit.NSMouseInRect(local, self.bounds(), self.isFlipped()))
+        if inside != self._hovered:
+            self._setHoverState_(inside)
 
     def mouseDown_(self, event):
         self._setHoverState_(False)
@@ -2157,6 +2350,34 @@ def _fmt_reset(dt):
     return dt.strftime("%b %-d, %-I%p").lower().replace("am", "am").replace("pm", "pm") + f" ({tz_name})"
 
 
+def _fmt_time_remaining(dt, now=None, compact=False):
+    """Format time left until dt.
+
+    Full form: '4시간 32분 남음' / '6일 3시간 남음'.
+    Compact form (for single-line rows): '4h32m' / '6일' / '45m'.
+    """
+    if not dt:
+        return None
+    now = datetime.now() if now is None else now
+    secs = int((dt - now).total_seconds())
+    if secs <= 0:
+        return "곧" if compact else "곧 갱신"
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if compact:
+        if days > 0:
+            return f"{math.ceil(secs / 86400)}일"  # round up: time remaining
+        if hours > 0:
+            return f"{hours}h{mins}m"
+        return f"{mins}m"
+    if days > 0:
+        return f"{days}일 {hours}시간 남음"
+    if hours > 0:
+        return f"{hours}시간 {mins}분 남음"
+    return f"{mins}분 남음"
+
+
 def _codex_section_summary(codex_usage):
     """Return display strings for the local Codex usage section."""
     if not codex_usage or not codex_usage.get("available"):
@@ -2200,28 +2421,112 @@ def _combined_robot_usage_pct(data):
     return max(claude_pct, codex_pct)
 
 
-def _title_data_for_config(data):
-    """Build title formatting data from either Claude or Codex usage."""
-    config = data["config"]
-    title_source = config.get("title_source", "claude")
-    if title_source == "codex":
-        codex_usage = data.get("codex_usage") or {}
-        if codex_usage.get("available"):
-            return {
-                "title_mode": config.get("title_display", "session"),
-                "title_source": "codex",
-                "sess_pct": float(codex_usage.get("session_pct") or 0),
-                "week_pct": float(codex_usage.get("week_pct") or 0),
-                "api_stale": False,
-            }
+def _primary_progress_sections(data):
+    """Return the top progress cards, showing both Claude and Codex when available.
 
-    return {
-        "title_mode": config.get("title_display", "session"),
-        "title_source": "claude",
-        "sess_pct": data["sess_pct"],
-        "week_pct": data["week_pct"],
-        "api_stale": (data["api_stale"] or not data["api_ok"]),
-    }
+    Both providers are surfaced at once so usage is visible at a glance; the
+    configured title source only decides which provider is listed first.
+    """
+    config = data["config"]
+    codex_usage = data.get("codex_usage") or {}
+    codex_available = bool(codex_usage.get("available"))
+
+    def claude_sections():
+        out = []
+        if config.get("show_session", True):
+            out.append({
+                "label": _provider_label("claude", "세션"),
+                "pct": data["sess_pct"],
+                "reset": data["sess_reset"],
+                "is_estimate": not data["api_ok"],
+                "provider": "claude",
+            })
+        if config.get("show_week", True):
+            out.append({
+                "label": _provider_label("claude", "주간"),
+                "pct": data["week_pct"],
+                "reset": data["week_reset"],
+                "is_estimate": not data["api_ok"],
+                "provider": "claude",
+            })
+        if config.get("show_sonnet", True) and data["sonnet_pct"] is not None:
+            out.append({
+                "label": _provider_label("claude", "Sonnet"),
+                "pct": data["sonnet_pct"],
+                "reset": data["sonnet_reset"],
+                "is_estimate": False,
+                "provider": "claude",
+            })
+        return out
+
+    def codex_sections():
+        if not codex_available:
+            return []
+        out = []
+        if config.get("show_session", True):
+            out.append({
+                "label": "Codex 세션",
+                "pct": float(codex_usage.get("session_pct") or 0),
+                "reset": codex_usage.get("session_reset"),
+                "is_estimate": False,
+                "provider": "openai",
+            })
+        if config.get("show_week", True):
+            out.append({
+                "label": "Codex 주간",
+                "pct": float(codex_usage.get("week_pct") or 0),
+                "reset": codex_usage.get("week_reset"),
+                "is_estimate": False,
+                "provider": "openai",
+            })
+        return out
+
+    if config.get("title_source") == "codex":
+        return codex_sections() + claude_sections()
+    return claude_sections() + codex_sections()
+
+
+def _resolve_title_slots(data):
+    """Resolve configured slots into renderable {pct, tag, provider} dicts.
+
+    Slots whose provider data is unavailable are skipped; falls back to the
+    Claude session metric when nothing configured is available.
+    """
+    config = data["config"]
+    codex = data.get("codex_usage") or {}
+    out = []
+    for sid in _title_slots_from_config(config):
+        meta = _TITLE_SLOT_META.get(sid)
+        if not meta:
+            continue
+        provider, tag = meta["provider"], meta["tag"]
+        if sid == "claude_session":
+            pct, avail = data.get("sess_pct", 0), True
+        elif sid == "claude_week":
+            pct, avail = data.get("week_pct", 0), True
+        elif sid == "claude_sonnet":
+            pct = data.get("sonnet_pct")
+            avail = pct is not None
+        elif sid == "codex_session":
+            pct, avail = float(codex.get("session_pct") or 0), bool(codex.get("available"))
+        elif sid == "codex_week":
+            pct, avail = float(codex.get("week_pct") or 0), bool(codex.get("available"))
+        else:
+            continue
+        if avail:
+            out.append({"pct": float(pct or 0), "tag": tag, "provider": provider})
+
+    if not out:
+        out.append({"pct": float(data.get("sess_pct", 0) or 0), "tag": "5h", "provider": "claude"})
+    return out
+
+
+def _title_data_for_config(data):
+    """Build title formatting data (resolved slots + stale flag) for rendering."""
+    slots = _resolve_title_slots(data)
+    has_claude = any(s["provider"] == "claude" for s in slots)
+    api_stale = has_claude and (data["api_stale"] or not data["api_ok"])
+    return {"slots": slots, "api_stale": api_stale}
 
 
 # ─── Menu Bar App ────────────────────────────────────────────────────────────
@@ -2239,6 +2544,8 @@ class ClaudeUsageApp(rumps.App):
         # Popover state
         self._popover = None
         self._popover_scroll = None
+        self._scroll_observer = None
+        self._scroll_clip_observed = None
         self._popover_view_controller = None
         self._toggle_target = None
         self._popover_delegate = None
@@ -2264,13 +2571,13 @@ class ClaudeUsageApp(rumps.App):
         self._anim_timer = None
         self._anim_interval = _anim_interval_for_pct(0)
         self._anim_pct = 0
-        self._anim_provider = _title_badge_provider_for_config(_load_config())
+        self._anim_provider = None
         self._last_title_snapshot = snapshot
         # Minimal fallback menu (quit only)
         self.menu.add(rumps.MenuItem("종료", callback=rumps.quit_application))
 
     def _set_status_title(self, title_data):
-        """Set menu bar usage text with provider badge between icon and text."""
+        """Set menu bar usage text, coloring each slot by its provider."""
         title_text = _format_title_from_data(title_data)
         try:
             button = self._nsapp.nsstatusitem.button()
@@ -2279,11 +2586,41 @@ class ClaudeUsageApp(rumps.App):
                     button.setImagePosition_(AppKit.NSImageLeft)
                 except Exception:
                     pass
-                button.setTitle_(title_text)
+                attr = self._build_attributed_title(title_data)
+                if attr is not None:
+                    button.setAttributedTitle_(attr)
+                else:
+                    button.setTitle_(title_text)
                 return
         except Exception as e:
             print(f"[TITLE] attributed title error: {e}", flush=True)
         self.title = title_text
+
+    def _build_attributed_title(self, title_data):
+        """Build an NSAttributedString title with per-provider colored segments."""
+        try:
+            slots = title_data.get("slots")
+            if slots is None:
+                slots = _legacy_title_slots(title_data)
+            stale_mark = "~" if title_data.get("api_stale") else ""
+            sep_color = AppKit.NSColor.secondaryLabelColor()
+
+            def seg(text, color):
+                return AppKit.NSAttributedString.alloc().initWithString_attributes_(
+                    text, {AppKit.NSForegroundColorAttributeName: color}
+                )
+
+            full = AppKit.NSMutableAttributedString.alloc().init()
+            full.appendAttributedString_(seg(f" {stale_mark}", sep_color))
+            for i, s in enumerate(slots):
+                if i > 0:
+                    full.appendAttributedString_(seg(" | ", sep_color))
+                color = _TITLE_PROVIDER_COLOR.get(s["provider"], AppKit.NSColor.labelColor())
+                full.appendAttributedString_(seg(f"{s['tag']} {s['pct']:.0f}%", color))
+            return full
+        except Exception as e:
+            print(f"[TITLE] attributed build error: {e}", flush=True)
+            return None
 
     @rumps.timer(1)
     def _initial_load(self, timer):
@@ -2323,9 +2660,10 @@ class ClaudeUsageApp(rumps.App):
         self._register_wake_observer()
         # Initialize animation frames
         try:
-            self._anim_provider = _title_badge_provider_for_config(_load_config())
-            self._anim_frames = _create_robot_frames(self._anim_pct, provider=self._anim_provider)
-            self._anim_static = _create_robot_frame(0, self._anim_pct, provider=self._anim_provider)
+            # Provider identity now lives in the colored title, not an icon badge.
+            self._anim_provider = None
+            self._anim_frames = _create_robot_frames(self._anim_pct, provider=None)
+            self._anim_static = _create_robot_frame(0, self._anim_pct, provider=None)
             print("[ANIM] Robot frames created", flush=True)
         except Exception as e:
             print(f"[ANIM] Frame creation failed: {e}", flush=True)
@@ -2408,19 +2746,16 @@ class ClaudeUsageApp(rumps.App):
     def _update_anim_speed(self, pct):
         """Update robot animation speed and color based on usage percentage."""
         new_interval = _anim_interval_for_pct(pct)
-        provider = _title_badge_provider_for_config(_load_config())
         pct_changed = abs(float(pct) - float(self._anim_pct)) >= 1
-        provider_changed = provider != self._anim_provider
         interval_changed = abs(new_interval - self._anim_interval) / max(self._anim_interval, 0.01) > 0.1
 
-        if pct_changed or provider_changed:
-            self._anim_provider = provider
-            self._anim_frames = _create_robot_frames(pct, provider=provider)
-            self._anim_static = _create_robot_frame(0, pct, provider=provider)
+        if pct_changed:
+            self._anim_frames = _create_robot_frames(pct, provider=None)
+            self._anim_static = _create_robot_frame(0, pct, provider=None)
             if self._anim_frames:
                 self._anim_index %= len(self._anim_frames)
 
-        if pct_changed or provider_changed or interval_changed:
+        if pct_changed or interval_changed:
             old = self._anim_interval
             self._anim_interval = new_interval
             self._anim_pct = pct
@@ -2652,46 +2987,26 @@ class ClaudeUsageApp(rumps.App):
         views = []  # list of (view, height)
 
         # 1. Account info
-        acct_email = _api_cache.get("account_email")
-        acct_name = _api_cache.get("account_name")
-        if acct_email:
-            label = f"{acct_name} ({acct_email})" if acct_name else acct_email
+        label = _account_label_for_config(data)
+        if label:
             tf = _make_text_field(label, font_size=11, color=_TEXT_SECONDARY)
             tf.setFrame_(NSMakeRect(CARD_INSET, 0, card_w, 16))
             views.append((tf, 16))
 
-        # 2. API status
-        if not data["api_ok"]:
-            tf = _make_text_field("⚠️ Usage API 일시 장애", font_size=11, color=_YELLOW)
+        # 2. API/local data status
+        notice = _api_status_notice(data)
+        if notice:
+            text, tone = notice
+            prefix = "⚠️ " if tone == "warning" else "⏳ "
+            color = _YELLOW if tone == "warning" else _TEXT_SECONDARY
+            tf = _make_text_field(prefix + text, font_size=11, color=color)
             tf.setFrame_(NSMakeRect(CARD_INSET, 0, card_w, 16))
             views.append((tf, 16))
-        elif data["api_stale"]:
-            ago = int(time.time() - _api_cache["fetched_at"])
-            tf = _make_text_field(f"⏳ 캐시 데이터 ({ago}초 전)", font_size=11, color=_TEXT_SECONDARY)
-            tf.setFrame_(NSMakeRect(CARD_INSET, 0, card_w, 16))
-            views.append((tf, 16))
 
-        # 3. Session progress card
-        if config.get("show_session", True):
-            reset_text = _fmt_reset(data["sess_reset"]) if data["sess_reset"] else None
-            card = _build_progress_section(_provider_label("claude", "세션"), data["sess_pct"],
-                                           reset_text=reset_text, is_estimate=not data["api_ok"],
-                                           provider="claude")
-            views.append((card, card.frame().size.height))
-
-        # 4. Week progress card
-        if config.get("show_week", True):
-            reset_text = _fmt_reset(data["week_reset"]) if data["week_reset"] else None
-            card = _build_progress_section(_provider_label("claude", "주간 전체"), data["week_pct"],
-                                           reset_text=reset_text, is_estimate=not data["api_ok"],
-                                           provider="claude")
-            views.append((card, card.frame().size.height))
-
-        # 5. Sonnet progress card
-        if config.get("show_sonnet", True) and data["sonnet_pct"] is not None:
-            reset_text = _fmt_reset(data["sonnet_reset"]) if data["sonnet_reset"] else None
-            card = _build_progress_section(_provider_label("claude", "주간 Sonnet"), data["sonnet_pct"],
-                                           reset_text=reset_text, provider="claude")
+        # 3-5. Primary provider progress (Claude + Codex), compact one-line rows
+        sections = _primary_progress_sections(data)
+        if sections:
+            card = _build_compact_progress_card(sections, card_inner_w)
             views.append((card, card.frame().size.height))
 
         # 6. Separator
@@ -2757,12 +3072,47 @@ class ClaudeUsageApp(rumps.App):
         scroll.setDocumentView_(container)
         self._popover.setContentSize_(NSSize(POPOVER_WIDTH, max_h))
         self._popover_scroll = scroll
+        self._observe_scroll_for_hover(scroll)
         if self._popover_view_controller is None:
             self._popover_view_controller = PopoverViewController.alloc().initWithView_(scroll)
             self._popover.setContentViewController_(self._popover_view_controller)
         else:
             self._popover_view_controller.setView_(scroll)
         self._restore_pending_section_anchor()
+
+    def _observe_scroll_for_hover(self, scroll):
+        """Re-sync HoverButton states while scrolling so none stay stuck on."""
+        nc = AppKit.NSNotificationCenter.defaultCenter()
+        if self._scroll_observer is None:
+            self._scroll_observer = _NotificationObserver.alloc().initWithCallback_(
+                self._on_scroll_sync_hover
+            )
+        if self._scroll_clip_observed is not None:
+            nc.removeObserver_name_object_(
+                self._scroll_observer,
+                AppKit.NSViewBoundsDidChangeNotification,
+                self._scroll_clip_observed,
+            )
+        clip = scroll.contentView()
+        clip.setPostsBoundsChangedNotifications_(True)
+        nc.addObserver_selector_name_object_(
+            self._scroll_observer,
+            b"handle:",
+            AppKit.NSViewBoundsDidChangeNotification,
+            clip,
+        )
+        self._scroll_clip_observed = clip
+
+    def _on_scroll_sync_hover(self):
+        doc = self._popover_scroll.documentView() if self._popover_scroll else None
+        if doc is not None:
+            self._sync_hover_buttons(doc)
+
+    def _sync_hover_buttons(self, view):
+        for sub in view.subviews():
+            if isinstance(sub, HoverButton):
+                sub.syncHoverToMouse()
+            self._sync_hover_buttons(sub)
 
     def _capture_section_anchor(self, key):
         """Remember the clicked section header's current position inside the viewport."""
@@ -2846,41 +3196,13 @@ class ClaudeUsageApp(rumps.App):
         if not self._collapse_state.get("codex", False):
             return views
 
-        codex_usage = data["codex_usage"]
+        # Session/week gauges are shown in the always-visible top area now, so
+        # this collapsible only carries the extra token/plan detail rows.
         line_h = 15
-        bar_h = 5
         rows = summary["rows"]
-        total_h = 14 + bar_h + 8 + 14 + bar_h + 8 + max(1, len(rows)) * line_h
+        total_h = max(1, len(rows)) * line_h + 4
         card = _build_card(total_h)
         y = total_h
-
-        for label, pct, reset_key in [
-            ("세션", summary["session_pct"], "session_reset"),
-            ("주간", summary["week_pct"], "week_reset"),
-        ]:
-            y -= 14
-            tf_left = _make_text_field(label, font_size=10, color=_TEXT_PRIMARY, bold=True)
-            tf_left.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w * 0.5, 14))
-            card.addSubview_(tf_left)
-
-            reset = codex_usage.get(reset_key)
-            right = f"{pct:.0f}%"
-            if reset:
-                right += f" · {_fmt_reset(reset)}"
-            tf_right = _make_text_field(right, font_size=9, color=_TEXT_SECONDARY)
-            tf_right.setAlignment_(AppKit.NSTextAlignmentRight)
-            tf_right.setFrame_(NSMakeRect(CARD_PADDING + card_inner_w * 0.5, y + CARD_PADDING,
-                                          card_inner_w * 0.5, 14))
-            card.addSubview_(tf_right)
-
-            y -= (bar_h + 2)
-            bar = ProgressBarView.alloc().initWithFrame_percentage_color_(
-                NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, bar_h),
-                pct,
-                _progress_color(pct),
-            )
-            card.addSubview_(bar)
-            y -= 6
 
         if rows:
             for label, value in rows:
@@ -3294,18 +3616,23 @@ class ClaudeUsageApp(rumps.App):
         line_h = 22
 
         settings_lines = []
-        title_mode = config.get("title_display", "session")
-        title_source = config.get("title_source", "claude")
+        slots = _title_slots_from_config(config)
+        slot1 = slots[0] if len(slots) >= 1 else None
+        slot2 = slots[1] if len(slots) >= 2 else None
 
-        for mode, label in [("session", "타이틀: 세션"), ("week", "타이틀: 주간"), ("both", "타이틀: 둘 다")]:
-            check = "✓ " if title_mode == mode else "   "
-            settings_lines.append((f"{check}{label}", mode, "title"))
+        settings_lines.append(("타이틀 슬롯 1", None, "header"))
+        for sid, label, _prov, _tag in TITLE_SLOT_DEFS:
+            check = "✓ " if slot1 == sid else "   "
+            settings_lines.append((f"{check}{label}", (0, sid), "title_slot"))
 
         settings_lines.append(None)
 
-        for source, label in [("claude", "타이틀 기준: Claude"), ("codex", "타이틀 기준: Codex")]:
-            check = "✓ " if title_source == source else "   "
-            settings_lines.append((f"{check}{label}", source, "title_source"))
+        settings_lines.append(("타이틀 슬롯 2", None, "header"))
+        check = "✓ " if slot2 is None else "   "
+        settings_lines.append((f"{check}없음", (1, None), "title_slot"))
+        for sid, label, _prov, _tag in TITLE_SLOT_DEFS:
+            check = "✓ " if slot2 == sid else "   "
+            settings_lines.append((f"{check}{label}", (1, sid), "title_slot"))
 
         settings_lines.append(None)
 
@@ -3337,6 +3664,14 @@ class ClaudeUsageApp(rumps.App):
                 continue
 
             text, key, kind = item
+
+            if kind == "header":
+                hdr = _make_text_field(text, font_size=10, color=_TEXT_SECONDARY, bold=True)
+                hdr.setFrame_(NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, line_h))
+                card.addSubview_(hdr)
+                y -= line_h
+                continue
+
             btn = HoverButton.alloc().initWithFrame_(
                 NSMakeRect(CARD_PADDING, y + CARD_PADDING, card_inner_w, line_h)
             )
@@ -3346,13 +3681,10 @@ class ClaudeUsageApp(rumps.App):
             btn.setBordered_(False)
             btn.setContentTintColor_(_TEXT_PRIMARY)
 
-            if kind == "title":
+            if kind == "title_slot":
+                index, metric_id = key
                 action = _ButtonAction.alloc().initWithCallback_(
-                    lambda m=key: self._set_title_display(m)
-                )
-            elif kind == "title_source":
-                action = _ButtonAction.alloc().initWithCallback_(
-                    lambda s=key: self._set_title_source(s)
+                    lambda i=index, m=metric_id: self._set_title_slot(i, m)
                 )
             else:
                 action = _ButtonAction.alloc().initWithCallback_(
@@ -3447,23 +3779,26 @@ class ClaudeUsageApp(rumps.App):
 
     # ── settings callbacks ───────────────────────────────────────────────
 
-    def _set_title_display(self, mode):
+    def _set_title_slot(self, index, metric_id):
+        """Set/clear a menu bar title slot (index 0 or 1)."""
         config = _load_config()
-        config["title_display"] = mode
+        slots = list(_title_slots_from_config(config))
+        if metric_id is None:
+            # Clear this slot (only slot 2 offers '없음').
+            if index < len(slots):
+                del slots[index]
+        elif index < len(slots):
+            slots[index] = metric_id
+        else:
+            slots.append(metric_id)
+        # Drop a duplicate of the same metric in the other slot.
+        deduped = []
+        for s in slots[:2]:
+            if s not in deduped:
+                deduped.append(s)
+        config["title_slots"] = deduped or ["claude_session"]
         _save_config(config)
-        # Update cached config and title bar without re-fetching data
-        if self._cached_data:
-            self._cached_data["config"] = config
-            title_data = _title_data_for_config(self._cached_data)
-            self._set_status_title(title_data)
-            _save_last_title_snapshot(title_data)
-            self._update_anim_speed(_combined_robot_usage_pct(self._cached_data))
-        self._rebuild_popover_content()
-
-    def _set_title_source(self, source):
-        config = _load_config()
-        config["title_source"] = source
-        _save_config(config)
+        # Update cached config and title bar without re-fetching data.
         if self._cached_data:
             self._cached_data["config"] = config
             title_data = _title_data_for_config(self._cached_data)

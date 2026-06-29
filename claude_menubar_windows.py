@@ -34,7 +34,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.1.5"
+APP_VERSION = "2.2.0"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -840,6 +840,24 @@ def _fmt_reset(dt):
     if dt.date() == now.date():
         return dt.strftime("%I%p").lstrip("0").lower() + f" ({tz_name})"
     return dt.strftime("%b %d, %I%p").lstrip("0").lower() + f" ({tz_name})"
+
+
+def _fmt_time_remaining(dt, now=None):
+    """Format time left until dt like '4h 32m left' / '6d 3h left'."""
+    if not dt:
+        return ""
+    now = datetime.now() if now is None else now
+    secs = int((dt - now).total_seconds())
+    if secs <= 0:
+        return "due now"
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if days > 0:
+        return f"{days}d {hours}h left"
+    if hours > 0:
+        return f"{hours}h {mins}m left"
+    return f"{mins}m left"
 
 
 # ─── Update checker ─────────────────────────────────────────────────────────
@@ -1734,7 +1752,9 @@ class ClaudeUsageTray:
             sess_pct = data["sess_pct"]
             items.append(pystray.MenuItem(f"\u23f1\ufe0f Session{est}: {make_bar(sess_pct)}", _noop))
             if data["sess_reset"]:
-                items.append(pystray.MenuItem(f"  \u23f3 Resets {_fmt_reset(data['sess_reset'])}", _noop))
+                items.append(pystray.MenuItem(
+                    f"  \u23f3 {_fmt_time_remaining(data['sess_reset'])} \u00b7 {_fmt_reset(data['sess_reset'])}",
+                    _noop))
             items.append(pystray.Menu.SEPARATOR)
 
         # Week (all models)
@@ -1742,14 +1762,18 @@ class ClaudeUsageTray:
             week_pct = data["week_pct"]
             items.append(pystray.MenuItem(f"\U0001f4c5 Week (all){est}: {make_bar(week_pct)}", _noop))
             if data["week_reset"]:
-                items.append(pystray.MenuItem(f"  \u23f3 Resets {_fmt_reset(data['week_reset'])}", _noop))
+                items.append(pystray.MenuItem(
+                    f"  \u23f3 {_fmt_time_remaining(data['week_reset'])} \u00b7 {_fmt_reset(data['week_reset'])}",
+                    _noop))
             items.append(pystray.Menu.SEPARATOR)
 
         # Week (Sonnet only)
         if config.get("show_sonnet", True) and data["sonnet_pct"] is not None:
             items.append(pystray.MenuItem(f"\U0001f4a0 Week (Sonnet): {make_bar(data['sonnet_pct'])}", _noop))
             if data["sonnet_reset"]:
-                items.append(pystray.MenuItem(f"  \u23f3 Resets {_fmt_reset(data['sonnet_reset'])}", _noop))
+                items.append(pystray.MenuItem(
+                    f"  \u23f3 {_fmt_time_remaining(data['sonnet_reset'])} \u00b7 {_fmt_reset(data['sonnet_reset'])}",
+                    _noop))
             items.append(pystray.Menu.SEPARATOR)
 
         codex_usage = data.get("codex_usage") or {}
@@ -1760,7 +1784,7 @@ class ClaudeUsageTray:
                 _noop))
             if codex_usage.get("session_reset"):
                 codex_items.append(pystray.MenuItem(
-                    f"  \u23f3 Resets {_fmt_reset(codex_usage['session_reset'])}",
+                    f"  \u23f3 {_fmt_time_remaining(codex_usage['session_reset'])} \u00b7 {_fmt_reset(codex_usage['session_reset'])}",
                     _noop))
             plan = codex_usage.get("plan_type")
             week_label = f"Week ({plan})" if plan else "Week"
@@ -1769,7 +1793,7 @@ class ClaudeUsageTray:
                 _noop))
             if codex_usage.get("week_reset"):
                 codex_items.append(pystray.MenuItem(
-                    f"  \u23f3 Resets {_fmt_reset(codex_usage['week_reset'])}",
+                    f"  \u23f3 {_fmt_time_remaining(codex_usage['week_reset'])} \u00b7 {_fmt_reset(codex_usage['week_reset'])}",
                     _noop))
             codex_items.append(pystray.Menu.SEPARATOR)
             codex_items.append(pystray.MenuItem(

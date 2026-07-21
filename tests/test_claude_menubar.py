@@ -27,6 +27,7 @@ from claude_menubar import (
     _robot_duration_for_pct,
     _codex_section_summary,
     _combined_robot_usage_pct,
+    _codex_subprocess_env,
     _title_badge_provider_for_config,
     _provider_label,
     _load_last_title_snapshot,
@@ -190,6 +191,27 @@ class ClaudeUsageAppTests(unittest.TestCase):
             {"pct": 95.0, "tag": "5h", "provider": "claude"},
             {"pct": 8.0, "tag": "7d", "provider": "openai"},
         ])
+
+    def test_resolve_codex_session_slot_uses_week_when_only_week_is_available(self):
+        data = {
+            "config": {"title_slots": ["codex_session"]},
+            "sess_pct": 91,
+            "week_pct": 20,
+            "sonnet_pct": None,
+            "codex_usage": {
+                "available": True,
+                "session_available": False,
+                "session_pct": 0,
+                "week_available": True,
+                "week_pct": 4,
+            },
+        }
+
+        self.assertEqual(_resolve_title_slots(data), [{
+            "pct": 4.0,
+            "tag": "7d",
+            "provider": "openai",
+        }])
 
     def test_configure_popover_scroll_view_enables_overlay_scroller(self):
         scroll = _FakeScrollView()
@@ -481,6 +503,39 @@ class ClaudeUsageAppTests(unittest.TestCase):
 
 
 class CodexUsageTrackerTests(unittest.TestCase):
+    def test_codex_subprocess_env_adds_common_node_locations_for_launchagent(self):
+        env = _codex_subprocess_env({"PATH": "/usr/bin:/bin"})
+
+        self.assertIn("/usr/local/bin", env["PATH"].split(":"))
+        self.assertIn("/opt/homebrew/bin", env["PATH"].split(":"))
+
+    def test_latest_usage_prefers_live_app_server_and_classifies_weekly_window(self):
+        live_response = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 4,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 1785124803,
+                },
+                "secondary": None,
+                "planType": "pro",
+            }
+        }
+
+        with TemporaryDirectory() as tmpdir:
+            usage = CodexUsageTracker(
+                codex_dir=Path(tmpdir),
+                live_fetcher=lambda: live_response,
+            ).latest_usage()
+
+        self.assertTrue(usage["available"])
+        self.assertFalse(usage["session_available"])
+        self.assertTrue(usage["week_available"])
+        self.assertEqual(usage["week_pct"], 4)
+        self.assertEqual(usage["plan_type"], "pro")
+        self.assertEqual(usage["source"], "app-server")
+
     def test_latest_usage_reads_rate_limits_from_session_logs(self):
         with TemporaryDirectory() as tmpdir:
             codex_dir = Path(tmpdir)
@@ -495,7 +550,10 @@ class CodexUsageTrackerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            usage = CodexUsageTracker(codex_dir=codex_dir).latest_usage()
+            usage = CodexUsageTracker(
+                codex_dir=codex_dir,
+                live_fetcher=lambda: None,
+            ).latest_usage()
 
         self.assertTrue(usage["available"])
         self.assertEqual(usage["session_pct"], 4)
@@ -505,7 +563,10 @@ class CodexUsageTrackerTests(unittest.TestCase):
 
     def test_latest_usage_reports_unavailable_without_token_count_logs(self):
         with TemporaryDirectory() as tmpdir:
-            usage = CodexUsageTracker(codex_dir=Path(tmpdir)).latest_usage()
+            usage = CodexUsageTracker(
+                codex_dir=Path(tmpdir),
+                live_fetcher=lambda: None,
+            ).latest_usage()
 
         self.assertFalse(usage["available"])
 
@@ -523,6 +584,17 @@ class CodexUsageTrackerTests(unittest.TestCase):
         self.assertIn(("플랜", "pro"), summary["rows"])
         self.assertIn(("총 토큰", "12.3K"), summary["rows"])
         self.assertIn(("마지막 요청", "678"), summary["rows"])
+
+    def test_codex_summary_marks_missing_session_window_as_unavailable(self):
+        summary = _codex_section_summary({
+            "available": True,
+            "session_available": False,
+            "session_pct": 0,
+            "week_available": True,
+            "week_pct": 4,
+        })
+
+        self.assertEqual(summary["title"], "GPT/Codex  — / 4%")
 
 if __name__ == "__main__":
     unittest.main()

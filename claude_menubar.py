@@ -16,6 +16,8 @@ import base64
 import tempfile
 import shutil
 import subprocess
+import queue
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from collections import defaultdict
@@ -31,7 +33,7 @@ except ImportError:
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 GITHUB_REPO = "hmyanghm/claude-usage-menubar"
 GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -2116,12 +2118,132 @@ class UsageTracker:
         return result
 
 
+def _find_codex_executable():
+    """Locate an existing Codex CLI without installing or modifying anything."""
+    found = shutil.which("codex")
+    if found:
+        return found
+
+    candidates = [
+        Path.home() / ".npm-global" / "bin" / "codex",
+        Path("/opt/homebrew/bin/codex"),
+        Path("/usr/local/bin/codex"),
+    ]
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.insert(0, Path(appdata) / "npm" / "codex.cmd")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _codex_subprocess_env(base_env=None):
+    """Supply CLI locations omitted from launchd's minimal default PATH."""
+    env = dict(os.environ if base_env is None else base_env)
+    path_entries = [
+        str(Path.home() / ".npm-global" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ]
+    path_entries.extend(filter(None, env.get("PATH", "").split(os.pathsep)))
+    env["PATH"] = os.pathsep.join(dict.fromkeys(path_entries))
+    return env
+
+
+def _fetch_codex_rate_limits(timeout=8):
+    """Read the current Codex limits through the official local app-server."""
+    executable = _find_codex_executable()
+    if not executable:
+        return None
+
+    popen_kwargs = {
+        "stdin": subprocess.PIPE,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.DEVNULL,
+        "text": True,
+        "bufsize": 1,
+        "env": _codex_subprocess_env(),
+    }
+    if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    proc = None
+    reader_thread = None
+    messages = queue.Queue()
+    try:
+        proc = subprocess.Popen([executable, "app-server", "--stdio"], **popen_kwargs)
+
+        def _read_messages():
+            for line in proc.stdout:
+                try:
+                    messages.put(json.loads(line))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+        reader_thread = threading.Thread(target=_read_messages, daemon=True)
+        reader_thread.start()
+
+        def _send(message):
+            proc.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+            proc.stdin.flush()
+
+        def _response(request_id, deadline):
+            while time.monotonic() < deadline:
+                remaining = max(0.01, deadline - time.monotonic())
+                try:
+                    message = messages.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if message.get("id") == request_id:
+                    return message
+            return None
+
+        deadline = time.monotonic() + timeout
+        _send({
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "clientInfo": {
+                    "name": "claude-usage-monitor",
+                    "title": "Claude Usage Monitor",
+                    "version": APP_VERSION,
+                }
+            },
+        })
+        initialized = _response(1, deadline)
+        if not initialized or initialized.get("error"):
+            return None
+
+        _send({"method": "initialized"})
+        _send({"method": "account/rateLimits/read", "id": 2, "params": None})
+        response = _response(2, deadline)
+        if not response or response.get("error"):
+            return None
+        result = response.get("result")
+        return result if isinstance(result, dict) else None
+    except (OSError, BrokenPipeError, ValueError):
+        return None
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1)
+        if reader_thread is not None:
+            reader_thread.join(timeout=1)
+
+
 class CodexUsageTracker:
     """Read Codex CLI local session logs for the latest rate-limit snapshot."""
 
-    def __init__(self, codex_dir=None):
+    def __init__(self, codex_dir=None, live_fetcher=None):
         self.codex_dir = Path(codex_dir) if codex_dir else CODEX_DIR
         self.sessions_dir = self.codex_dir / "sessions"
+        self.live_fetcher = live_fetcher or _fetch_codex_rate_limits
 
     def _jsonl_files(self):
         if not self.sessions_dir.exists():
@@ -2154,6 +2276,43 @@ class CodexUsageTracker:
         except (TypeError, ValueError, OSError):
             return None
 
+    def _snapshot_from_rate_limits(self, rate_limits, camel_case=False):
+        primary = rate_limits.get("primary") or {}
+        secondary = rate_limits.get("secondary") or {}
+        duration_key = "windowDurationMins" if camel_case else "window_minutes"
+        percent_key = "usedPercent" if camel_case else "used_percent"
+        reset_key = "resetsAt" if camel_case else "resets_at"
+
+        windows = {}
+        for position, window in (("session", primary), ("week", secondary)):
+            if not isinstance(window, dict) or not window:
+                continue
+            duration = window.get(duration_key)
+            if duration == 300:
+                kind = "session"
+            elif duration == 10080:
+                kind = "week"
+            else:
+                kind = position
+            windows[kind] = window
+
+        session = windows.get("session")
+        week = windows.get("week")
+        plan_key = "planType" if camel_case else "plan_type"
+
+        return {
+            "available": True,
+            "session_available": session is not None,
+            "session_pct": float(session.get(percent_key) or 0) if session else 0,
+            "session_reset": self._parse_reset_epoch(session.get(reset_key)) if session else None,
+            "session_window_minutes": session.get(duration_key) if session else None,
+            "week_available": week is not None,
+            "week_pct": float(week.get(percent_key) or 0) if week else 0,
+            "week_reset": self._parse_reset_epoch(week.get(reset_key)) if week else None,
+            "week_window_minutes": week.get(duration_key) if week else None,
+            "plan_type": rate_limits.get(plan_key),
+        }
+
     def _snapshot_from_event(self, event):
         payload = event.get("payload")
         if not isinstance(payload, dict) or payload.get("type") != "token_count":
@@ -2163,31 +2322,39 @@ class CodexUsageTracker:
         if not isinstance(rate_limits, dict):
             return None
 
-        primary = rate_limits.get("primary") or {}
-        secondary = rate_limits.get("secondary") or {}
         info = payload.get("info") or {}
         total_usage = info.get("total_token_usage") or {}
         last_usage = info.get("last_token_usage") or {}
-
-        return {
-            "available": True,
+        snapshot = self._snapshot_from_rate_limits(rate_limits)
+        snapshot.update({
             "timestamp": self._parse_ts(event.get("timestamp")),
-            "session_pct": float(primary.get("used_percent") or 0),
-            "session_reset": self._parse_reset_epoch(primary.get("resets_at")),
-            "session_window_minutes": primary.get("window_minutes"),
-            "week_pct": float(secondary.get("used_percent") or 0),
-            "week_reset": self._parse_reset_epoch(secondary.get("resets_at")),
-            "week_window_minutes": secondary.get("window_minutes"),
-            "plan_type": rate_limits.get("plan_type"),
             "total_tokens": int(total_usage.get("total_tokens") or 0),
             "input_tokens": int(total_usage.get("input_tokens") or 0),
             "output_tokens": int(total_usage.get("output_tokens") or 0),
             "cached_input_tokens": int(total_usage.get("cached_input_tokens") or 0),
             "reasoning_output_tokens": int(total_usage.get("reasoning_output_tokens") or 0),
             "last_tokens": int(last_usage.get("total_tokens") or 0),
-        }
+        })
+        return snapshot
 
-    def latest_usage(self):
+    def _live_usage(self):
+        try:
+            response = self.live_fetcher()
+        except Exception:
+            return None
+        if not isinstance(response, dict):
+            return None
+        rate_limits = response.get("rateLimits")
+        if not isinstance(rate_limits, dict):
+            return None
+        snapshot = self._snapshot_from_rate_limits(rate_limits, camel_case=True)
+        snapshot.update({
+            "timestamp": datetime.now(),
+            "source": "app-server",
+        })
+        return snapshot
+
+    def _latest_local_usage(self):
         latest = None
         for fp in self._jsonl_files():
             try:
@@ -2212,6 +2379,22 @@ class CodexUsageTracker:
         if latest:
             return latest
         return {"available": False}
+
+    def latest_usage(self):
+        live = self._live_usage()
+        local = self._latest_local_usage()
+        if not live:
+            return local
+
+        if local.get("available"):
+            for key in (
+                "total_tokens", "input_tokens", "output_tokens",
+                "cached_input_tokens", "reasoning_output_tokens", "last_tokens",
+                "source_path",
+            ):
+                if key in local:
+                    live[key] = local[key]
+        return live
 
 
 # ─── Plan recommendation ────────────────────────────────────────────────────
@@ -2383,8 +2566,16 @@ def _codex_section_summary(codex_usage):
     if not codex_usage or not codex_usage.get("available"):
         return None
 
+    session_available = codex_usage.get(
+        "session_available", "session_pct" in codex_usage
+    )
+    week_available = codex_usage.get(
+        "week_available", "week_pct" in codex_usage
+    )
     sess_pct = float(codex_usage.get("session_pct") or 0)
     week_pct = float(codex_usage.get("week_pct") or 0)
+    sess_text = f"{sess_pct:.0f}%" if session_available else "—"
+    week_text = f"{week_pct:.0f}%" if week_available else "—"
     rows = []
 
     plan_type = codex_usage.get("plan_type")
@@ -2404,7 +2595,7 @@ def _codex_section_summary(codex_usage):
         rows.append(("업데이트", timestamp.strftime("%m/%d %-I:%M%p").lower()))
 
     return {
-        "title": f"{_provider_label('openai', 'Codex')}  {sess_pct:.0f}% / {week_pct:.0f}%",
+        "title": f"{_provider_label('openai', 'Codex')}  {sess_text} / {week_text}",
         "session_pct": sess_pct,
         "week_pct": week_pct,
         "rows": rows,
@@ -2415,7 +2606,9 @@ def _combined_robot_usage_pct(data):
     """Use the higher Claude or Codex session percentage for the robot animation."""
     claude_pct = float(data.get("sess_pct") or 0)
     codex_usage = data.get("codex_usage") or {}
-    if not codex_usage.get("available"):
+    if not codex_usage.get("available") or not codex_usage.get(
+        "session_available", "session_pct" in codex_usage
+    ):
         return claude_pct
     codex_pct = float(codex_usage.get("session_pct") or 0)
     return max(claude_pct, codex_pct)
@@ -2463,7 +2656,9 @@ def _primary_progress_sections(data):
         if not codex_available:
             return []
         out = []
-        if config.get("show_session", True):
+        if config.get("show_session", True) and codex_usage.get(
+            "session_available", "session_pct" in codex_usage
+        ):
             out.append({
                 "label": "Codex 세션",
                 "pct": float(codex_usage.get("session_pct") or 0),
@@ -2471,7 +2666,9 @@ def _primary_progress_sections(data):
                 "is_estimate": False,
                 "provider": "openai",
             })
-        if config.get("show_week", True):
+        if config.get("show_week", True) and codex_usage.get(
+            "week_available", "week_pct" in codex_usage
+        ):
             out.append({
                 "label": "Codex 주간",
                 "pct": float(codex_usage.get("week_pct") or 0),
@@ -2495,7 +2692,8 @@ def _resolve_title_slots(data):
     config = data["config"]
     codex = data.get("codex_usage") or {}
     out = []
-    for sid in _title_slots_from_config(config):
+    slot_ids = _title_slots_from_config(config)
+    for sid in slot_ids:
         meta = _TITLE_SLOT_META.get(sid)
         if not meta:
             continue
@@ -2508,9 +2706,21 @@ def _resolve_title_slots(data):
             pct = data.get("sonnet_pct")
             avail = pct is not None
         elif sid == "codex_session":
-            pct, avail = float(codex.get("session_pct") or 0), bool(codex.get("available"))
+            pct = float(codex.get("session_pct") or 0)
+            avail = bool(codex.get("available")) and bool(codex.get(
+                "session_available", "session_pct" in codex
+            ))
+            if not avail and "codex_week" not in slot_ids:
+                week_available = bool(codex.get("available")) and bool(codex.get(
+                    "week_available", "week_pct" in codex
+                ))
+                if week_available:
+                    pct, tag, avail = float(codex.get("week_pct") or 0), "7d", True
         elif sid == "codex_week":
-            pct, avail = float(codex.get("week_pct") or 0), bool(codex.get("available"))
+            pct = float(codex.get("week_pct") or 0)
+            avail = bool(codex.get("available")) and bool(codex.get(
+                "week_available", "week_pct" in codex
+            ))
         else:
             continue
         if avail:
